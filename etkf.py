@@ -1,14 +1,16 @@
 import numpy as np
 
 
-def etkf(X_ensemble, y_measured, H_obs, R_sensor):
+def etkf(X_ensemble, y_measured, y_pred, R_sensor):
     """
     Ensemble Transform Kalman Filter update.
 
-    X_ensemble : (n_state, N) — each column is one ensemble member's state vector
-    y_measured : (m,)         — observation vector
-    H_obs      : (m, n_state) — observation operator
-    R_sensor   : (m,)         — diagonal of observation noise covariance (variances)
+    X_ensemble : (n_state, N) each column is one ensemble member's state vector
+    y_measured : (m,)         observation vector (real measurements)
+    y_pred     : (m, N)       predicted observations for each ensemble member
+                                (computed externally, e.g. by slicing X_ensemble
+                                at the rows that correspond to sensor locations)
+    R_sensor   : (m,)         diagonal of observation noise covariance (variances)
 
     Returns X_analysis of shape (n_state, N).
     """
@@ -17,8 +19,8 @@ def etkf(X_ensemble, y_measured, H_obs, R_sensor):
     n_state, N = X_ensemble.shape
     m = y_measured.shape[0]
 
-    if H_obs.shape != (m, n_state):
-        print(f"H_obs has shape {H_obs.shape}, expected ({m}, {n_state})")
+    if y_pred.shape != (m, N):
+        print(f"y_pred has shape {y_pred.shape}, expected ({m}, {N})")
     if R_sensor.shape != (m,):
         print(f"R_sensor has shape {R_sensor.shape}, expected ({m},)")
 
@@ -26,8 +28,7 @@ def etkf(X_ensemble, y_measured, H_obs, R_sensor):
     x_mean = X_ensemble.mean(axis=1, keepdims=True)
     dX = X_ensemble - x_mean
 
-    # predicted observations and their deviations
-    y_pred = H_obs @ X_ensemble
+    # predicted observation mean and deviations
     y_pred_mean = y_pred.mean(axis=1, keepdims=True)
     dy_pred = y_pred - y_pred_mean
 
@@ -44,10 +45,10 @@ def etkf(X_ensemble, y_measured, H_obs, R_sensor):
 
     # eq 18 + 20: mean update via the Kalman gain
     # K_hat applied to innovation gives: K_t*d = delX @ Z @ eigenval-1 @ ZT (delX)T HT [(N-1)R]-1 * d
-    innovation = y_measured[:, None] - y_pred_mean #=d
-    R_inv_innovation = innovation / ((N - 1) * R_sensor[:, None]) #[(N-1)R]-1 * d, R is diagonal so R^-1 is just elemntwise division
+    innovation = y_measured[:, None] - y_pred_mean # = d
+    R_inv_innovation = innovation / ((N - 1) * R_sensor[:, None]) # [(N-1)R]-1 * d
     rhs = dy_pred.T @ R_inv_innovation # (delX)T HT [(N-1)R]-1 * d
-    w = Z @ ((Z.T @ rhs) / eigvals[:, None])  #  Z @ eigenval-1 @ ZT (delX)T HT [(N-1)R]-1 * d
+    w = Z @ ((Z.T @ rhs) / eigvals[:, None])  # Z @ eigenval-1 @ ZT (delX)T HT [(N-1)R]-1 * d
     mean_corr = dX @ w
     x_mean_analysis = x_mean + mean_corr
 
@@ -73,12 +74,14 @@ if __name__ == "__main__":
     ])
 
     # measure u at cell 1; truth-ish value 5.3
-    H = np.zeros((1, 7))
-    H[0, 0] = 1.0
+    # row 0 of X_ensemble corresponds to "u at cell 1"
+    obs_indices = np.array([0])
+    y_pred = X[obs_indices, :]   # shape (1, 3)
+    
     y = np.array([5.3])
     R = np.array([0.1])
 
-    X_a = etkf(X, y, H, R)
+    X_a = etkf(X, y, y_pred, R)
 
     print("Forecast inlet velocities:", X[-1, :])
     print(f"Forecast mean inlet: {X[-1, :].mean():.3f}")
