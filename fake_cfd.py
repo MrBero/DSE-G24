@@ -52,7 +52,7 @@ if __name__ == "__main__":
     
     # ensemble: 12 members spanning the parameter ranges
     rng = np.random.default_rng(0)
-    N = 12
+    N = 100
     U_inlet_lst = rng.uniform(3.5, 7.5, N)
     alpha_lst   = rng.uniform(-5.0, 5.0, N)
     

@@ -29,8 +29,8 @@ def load_all_cfds(path_lst, U_inlet_lst, alpha_lst):
         - rows come in pairs: row 2k is u at cell k, row 2k+1 is v at cell k
         - last two rows are inlet velocity and AoA, with NaN for x, y
     """
-    assert len(path_lst) == len(U_inlet_lst) == len(alpha_lst), \
-        "path list, U_inlet list, and alpha list must have the same length"
+    # assert len(path_lst) == len(U_inlet_lst) == len(alpha_lst), \
+    #     "path list, U_inlet list, and alpha list must have the same length"
     
     N = len(path_lst) #amount of cfds run
     

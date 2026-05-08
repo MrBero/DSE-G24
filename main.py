@@ -39,17 +39,12 @@ def main():
     print(f"Forecast AoA:              {alpha_lst}")
     print(f"Forecast mean AoA:         {alpha_lst.mean():.3f}\n")
     
-    # hand-pick drone locations inside the domain (0-30 in x, 0-10 in y)
-    drone_xy = np.array([
-        [5,  3],
-        [10, 7],
-        [15, 2],
-        [18, 8],
-        [22, 5],
-        [25, 3],
-        [27, 7],
-        [29, 4],
-    ])
+
+    # hand-pick drone locations inside the domain (0-30 in x, 0-10 in y, change later)
+    dims = (30, 10)
+    n_samples = 100
+    drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
+                          np.random.random(n_samples) * dims[1]]).T
     
     # generate synthetic measurements from the truth case
     y_measured, obs_indices, drone_xy_snapped = make_drone_observations(
@@ -104,33 +99,38 @@ def main():
     print(f"AoA improved: {alpha_improvement}")
     
     # # quick visual: histograms before vs after
-    # fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    bins = 16
+    axes[0].hist(U_inlet_lst, bins=bins, alpha=0.5, label='forecast', color='blue')
+    axes[0].hist(analysis_inlet, bins=bins, alpha=0.5, label='analysis', color='red')
+    axes[0].axvline(truth_U_inlet, color='black', linestyle='--', label='truth')
+    axes[0].set_xlabel('Inlet velocity')
+    axes[0].set_ylabel('Count')
+    axes[0].legend()
+    axes[0].set_title('Inlet velocity: before vs after')
     
-    # axes[0].hist(U_inlet_lst, bins=8, alpha=0.5, label='forecast', color='blue')
-    # axes[0].hist(analysis_inlet, bins=8, alpha=0.5, label='analysis', color='red')
-    # axes[0].axvline(truth_U_inlet, color='black', linestyle='--', label='truth')
-    # axes[0].set_xlabel('Inlet velocity')
-    # axes[0].set_ylabel('Count')
-    # axes[0].legend()
-    # axes[0].set_title('Inlet velocity: before vs after')
+    axes[1].hist(alpha_lst, bins=bins, alpha=0.5, label='forecast', color='blue')
+    axes[1].hist(analysis_alpha, bins=bins, alpha=0.5, label='analysis', color='red')
+    axes[1].axvline(truth_alpha, color='black', linestyle='--', label='truth')
+    axes[1].set_xlabel('AoA')
+    axes[1].set_ylabel('Count')
+    axes[1].legend()
+    axes[1].set_title('AoA: before vs after')
     
-    # axes[1].hist(alpha_lst, bins=8, alpha=0.5, label='forecast', color='blue')
-    # axes[1].hist(analysis_alpha, bins=8, alpha=0.5, label='analysis', color='red')
-    # axes[1].axvline(truth_alpha, color='black', linestyle='--', label='truth')
-    # axes[1].set_xlabel('AoA')
-    # axes[1].set_ylabel('Count')
-    # axes[1].legend()
-    # axes[1].set_title('AoA: before vs after')
-    
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(FOLDER, "assimilation_results.png"), dpi=100)
+    plt.tight_layout()
+    plt.savefig(os.path.join(FOLDER, "assimilation_results.png"), dpi=100)
 
 
-    print(X_analysis.shape)
+    # print(X_analysis.shape)
+    # print(np.min(Xtrue_mean_mags - X_mean_mags))
     # fig, ax = plt.subplots()
-    plt.scatter(drone_xy_snapped[:,0], drone_xy_snapped[:,1], c='red')
-    plt.scatter(X_positions[::2,0], X_positions[::2,1], c=Xtrue_mean_mags - X_mean_mags, cmap='RdBu')
-    plt.colorbar()
+    # fig.suptitle("X_true to X after ENKF")
+    # sc = ax.scatter(X_positions[::2,0], X_positions[::2,1], c=Xtrue_mean_mags - X_mean_mags, cmap='RdBu',
+    #                 vmin=np.min(Xtrue_mean_mags[:-2:] - X_mean_mags[:-2:]), vmax=0)
+    # ax.scatter(drone_xy_snapped[:,0], drone_xy_snapped[:,1], c='green')
+    
+    # plt.colorbar(sc, ax=ax)
+    
     # fig2, ax2 = plt.subplots()
     # ax2.scatter(X_positions[::2,0], X_positions[::2,1],  c=Xtrue_mean_mags, cmap='RdBu')
     plt.show()
