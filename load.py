@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 
 
 def load_one_cfd(csv_path):
@@ -7,13 +6,16 @@ def load_one_cfd(csv_path):
     Load one CFD output file with columns x, y, u, v.
     Returns four 1D NumPy arrays: x, y, u, v.
     """
-    df = pd.read_csv(csv_path, sep=",", skipinitialspace=True)
-    df = df.sort_values(by=["x", "y"]).reset_index(drop=True)
+    data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
     
-    x = df["x"].values
-    y = df["y"].values
-    u = df["u"].values
-    v = df["v"].values
+    # sort by x, then by y, for consistent ordering across files
+    sort_idx = np.lexsort((data[:, 1], data[:, 0]))
+    data = data[sort_idx]
+    
+    x = data[:, 0]
+    y = data[:, 1]
+    u = data[:, 2]
+    v = data[:, 3]
     
     return x, y, u, v
 
