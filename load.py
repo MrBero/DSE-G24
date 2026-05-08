@@ -78,6 +78,6 @@ def load_all_cfds(path_lst, U_inlet_lst, alpha_lst):
     
     # M_data is just M without the first two columns
     M_data = M[:, 2:]
-    
-    return M, M_data
+    M_drones = M[:,:2]
+    return M_drones, M_data
 

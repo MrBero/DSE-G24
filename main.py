@@ -1,0 +1,123 @@
+"""
+main.py
+
+End-to-end test of the ETKF pipeline using fake CFD data.
+
+Run generate_fake_cfd.py first to populate the data folder.
+"""
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+from load import load_all_cfds, load_one_cfd
+from drone_sampling import make_drone_observations
+from etkf import etkf
+
+
+# parameters used by generate_fake_cfd.py
+FOLDER = "fakedata"
+N = 12
+NOISE_STD = 0.15
+
+
+def main():
+    # paths and parameters
+    path_lst = [os.path.join(FOLDER, f"member_{i:02d}.csv") for i in range(N)]
+    truth_path = os.path.join(FOLDER, "truth.csv")
+    
+    U_inlet_lst = np.load(os.path.join(FOLDER, "U_inlet_lst.npy"))
+    alpha_lst   = np.load(os.path.join(FOLDER, "alpha_lst.npy"))
+    truth_params = np.load(os.path.join(FOLDER, "truth_params.npy"))
+    truth_U_inlet, truth_alpha = truth_params[0], truth_params[1]
+    
+    # load ensemble
+    M, X_ensemble = load_all_cfds(path_lst, U_inlet_lst, alpha_lst)
+    print(f"X_ensemble shape: {X_ensemble.shape}")
+    print(f"Forecast inlet velocities: {U_inlet_lst}")
+    print(f"Forecast mean inlet:       {U_inlet_lst.mean():.3f}")
+    print(f"Forecast AoA:              {alpha_lst}")
+    print(f"Forecast mean AoA:         {alpha_lst.mean():.3f}")
+    print()
+    
+    # hand-pick drone locations inside the domain (0-30 in x, 0-10 in y)
+    drone_xy = np.array([
+        [5,  3],
+        [10, 7],
+        [15, 2],
+        [18, 8],
+        [22, 5],
+        [25, 3],
+        [27, 7],
+        [29, 4],
+    ])
+    
+    # generate synthetic measurements from the truth case
+    y_measured, obs_indices, drone_xy_snapped = make_drone_observations(
+        truth_path, drone_xy, noise_std=NOISE_STD, seed=42
+    )
+    print(f"Number of measurements: {len(y_measured)}")
+    
+    # slice predicted observations from the ensemble
+    y_pred = X_ensemble[obs_indices, :]
+    
+    # observation noise covariance (assume same noise level for all sensors)
+    R = np.full(len(y_measured), NOISE_STD ** 2)
+    
+    # run ETKF
+    X_analysis = etkf(X_ensemble, y_measured, y_pred, R)
+    
+    # extract assimilated parameters
+    analysis_inlet = X_analysis[-2, :]
+    analysis_alpha = X_analysis[-1, :]
+    
+    print()
+    print("=== Results ===")
+    print(f"Truth inlet velocity:      {truth_U_inlet:.3f}")
+    print(f"Forecast mean inlet:       {U_inlet_lst.mean():.3f}")
+    print(f"Analysis mean inlet:       {analysis_inlet.mean():.3f}")
+    print(f"Analysis std inlet:        {analysis_inlet.std():.3f}")
+    print()
+    print(f"Truth AoA:                 {truth_alpha:.3f}")
+    print(f"Forecast mean AoA:         {alpha_lst.mean():.3f}")
+    print(f"Analysis mean AoA:         {analysis_alpha.mean():.3f}")
+    print(f"Analysis std AoA:          {analysis_alpha.std():.3f}")
+    print()
+    
+    # success check
+    inlet_improvement = abs(analysis_inlet.mean() - truth_U_inlet) < abs(U_inlet_lst.mean() - truth_U_inlet)
+    alpha_improvement = abs(analysis_alpha.mean() - truth_alpha)   < abs(alpha_lst.mean()   - truth_alpha)
+    
+    if inlet_improvement and alpha_improvement:
+        print("SUCCESS: ETKF moved both parameters closer to truth")
+    else:
+        print("WARNING: assimilation did not improve both parameters")
+        print("  Inlet improved:", inlet_improvement)
+        print("  AoA improved:  ", alpha_improvement)
+    
+    # quick visual: histograms before vs after
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    
+    axes[0].hist(U_inlet_lst, bins=8, alpha=0.5, label='forecast', color='blue')
+    axes[0].hist(analysis_inlet, bins=8, alpha=0.5, label='analysis', color='red')
+    axes[0].axvline(truth_U_inlet, color='black', linestyle='--', label='truth')
+    axes[0].set_xlabel('Inlet velocity')
+    axes[0].set_ylabel('Count')
+    axes[0].legend()
+    axes[0].set_title('Inlet velocity: before vs after')
+    
+    axes[1].hist(alpha_lst, bins=8, alpha=0.5, label='forecast', color='blue')
+    axes[1].hist(analysis_alpha, bins=8, alpha=0.5, label='analysis', color='red')
+    axes[1].axvline(truth_alpha, color='black', linestyle='--', label='truth')
+    axes[1].set_xlabel('AoA')
+    axes[1].set_ylabel('Count')
+    axes[1].legend()
+    axes[1].set_title('AoA: before vs after')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(FOLDER, "assimilation_results.png"), dpi=100)
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
