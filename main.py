@@ -20,7 +20,7 @@ def main():
     #simulations
     U_inlet_lst = []
     alpha_lst = []
-    directory = os.path.join(case_folder, 'simulation_outputs')
+    directory = os.path.join(case_folder, 'simulation_outputs') #CHANGE THE BASE CFDS TO THE UPDATED ONES
     for f in os.listdir(directory):
         # print(f)
         string = f.split(sep='_')
@@ -45,7 +45,7 @@ def main():
     #     drone_xy = np.array(json.load(f)['xy'])
     #     # print(drone_xy['xy'])
 
-    n_samples = 100
+    n_samples = 40
     drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
                           np.random.random(n_samples) * dims[1] - dims[1]/2]).T
 
@@ -55,11 +55,11 @@ def main():
     )
     
     #calculate the mean of all CFDs before
-    Xtrue_mean = np.mean(X_ensemble, axis=1)
-    Xtrue_mean_even = Xtrue_mean[::2]
-    Xtrue_mean_odd = Xtrue_mean[1::2]
+    Xinitial_mean = np.mean(X_ensemble, axis=1)
+    Xinitial_mean_even = Xinitial_mean[::2]
+    Xinitial_mean_odd = Xinitial_mean[1::2]
     # X_mean_reshaped = np.vstack([X_mean_even, X_mean_odd])
-    Xtrue_mean_mags = np.sqrt(np.pow(Xtrue_mean_even,2) + np.pow(Xtrue_mean_odd, 2))
+    Xinitial_mean_mags = np.sqrt(np.pow(Xinitial_mean_even,2) + np.pow(Xinitial_mean_odd, 2))
     
     # slice predicted observations from the ensemble
     y_pred = X_ensemble[obs_indices, :]
@@ -107,10 +107,14 @@ def main():
     print(f"Inlet improved: {inlet_improvement}")
     print(f"AoA improved: {alpha_improvement}")
 
+    xtrue, ytrue, utrue, vtrue = load_one_cfd(truth_path)
+    Xtrue_positions = np.vstack([xtrue, ytrue]).T
+    Xtrue_mags = np.sqrt(utrue**2 + vtrue**2)
     plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_alpha, truth_alpha)
-    # plot_just_field(X_positions, X_mean_mags, title = "Initial Means")
-    # plot_just_field(X_positions, X_mean_mags, title = "Final Means")
-    plot_error_field(X_positions, Xtrue_mean_mags, X_mean_mags, drone_xy_snapped)
+    plot_just_field(Xtrue_positions, Xtrue_mags, title = 'Truth', flat = False)
+    plot_just_field(X_positions, Xinitial_mean_mags, title = "Initial Means")
+    plot_just_field(X_positions, X_mean_mags, title = "Final Means")
+    # plot_error_field(X_positions, Xtrue_mean_mags, X_mean_mags, drone_xy_snapped)
     
     plt.show()
     

@@ -2,10 +2,14 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot_just_field(X_positions, Xtrue_mean_mags, title):
+def plot_just_field(X_positions, Xtrue_mean_mags, title, flat=True):
     fig2, ax2 = plt.subplots()
     fig2.suptitle(title)
-    ax2.scatter(X_positions[::2,0], X_positions[::2,1],  c=Xtrue_mean_mags, cmap='RdBu')
+    if flat:
+        sc = ax2.scatter(X_positions[::2,0], X_positions[::2,1],  c=Xtrue_mean_mags, cmap='RdBu')
+    else: 
+        sc = ax2.scatter(X_positions[:,0], X_positions[:,1],  c=Xtrue_mean_mags, cmap='RdBu')
+    plt.colorbar(sc, ax=ax2)
     
 def plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_alpha, truth_alpha):
     # # quick visual: histograms before vs after
