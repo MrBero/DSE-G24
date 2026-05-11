@@ -79,11 +79,6 @@ if __name__ == "__main__":
     write_cfd_file(truth_path, x, y, u_truth, v_truth)
     print(f"  wrote {truth_path}: U={truth_U_inlet}, alpha={truth_alpha}")
     
-    # save the parameter lists so main.py can read them back
-    np.save(os.path.join(folder, "U_inlet_lst.npy"), U_inlet_lst)
-    np.save(os.path.join(folder, "alpha_lst.npy"),   alpha_lst)
-    np.save(os.path.join(folder, "truth_params.npy"),
-            np.array([truth_U_inlet, truth_alpha]))
-    
-    print()
+
+    print(f"U_inlet: {U_inlet_lst} \n alpha: {alpha_lst} \n truth params: {truth_U_inlet, truth_alpha}")
     print("Done. Run main.py next.")

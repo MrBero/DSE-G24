@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def etkf(X_ensemble, y_measured, y_pred, R_sensor):
+def etkf(X_ensemble, y_measured, y_pred, R_sensor, bar):
     """
     Ensemble Transform Kalman Filter update.
 
@@ -25,24 +25,35 @@ def etkf(X_ensemble, y_measured, y_pred, R_sensor):
         print(f"R_sensor has shape {R_sensor.shape}, expected ({m},)")
 
     # ensemble mean and deviations
+    print('ensemble mean...')
     x_mean = X_ensemble.mean(axis=1, keepdims=True)
     dX = X_ensemble - x_mean
+    bar()
 
     # predicted observation mean and deviations
+    print('predicted mean...')
     y_pred_mean = y_pred.mean(axis=1, keepdims=True)
     dy_pred = y_pred - y_pred_mean
+    bar()
 
+    print('eq 17...')
     # eq 17: build M = I + dX^T H^T [(N-1)R]^-1 H dX
     R_inv_dy = dy_pred / R_sensor[:, None]
     M = np.eye(N) + (dy_pred.T @ R_inv_dy) / (N - 1)
+    bar()
 
+    print('eigs...')
     # eigendecomposition of M (symmetric, so use eigh)
     eigvals, Z = np.linalg.eigh(M)
     eigvals = np.maximum(eigvals, 1e-12)  # guard against tiny negative floats
+    bar()
 
+    print('eq 19...')
     # eq 19: T = Z Sigma^-1/2 Z^T
     T = (Z * (1.0 / np.sqrt(eigvals))) @ Z.T
+    bar()
 
+    print('eq 18 and 20...')
     # eq 18 + 20: mean update via the Kalman gain
     # K_hat applied to innovation gives: K_t*d = delX @ Z @ eigenval-1 @ ZT (delX)T HT [(N-1)R]-1 * d
     innovation = y_measured[:, None] - y_pred_mean # = d
@@ -51,12 +62,17 @@ def etkf(X_ensemble, y_measured, y_pred, R_sensor):
     w = Z @ ((Z.T @ rhs) / eigvals[:, None])  # Z @ eigenval-1 @ ZT (delX)T HT [(N-1)R]-1 * d
     mean_corr = dX @ w
     x_mean_analysis = x_mean + mean_corr
+    bar()
 
+    print('eq 21...')
     # eq 21: deviation update
     dX_analysis = dX @ T
+    bar()
 
+    print('eq 22...')
     # eq 22: reassemble
     X_analysis = x_mean_analysis + dX_analysis
+    bar()
 
     return X_analysis
 
