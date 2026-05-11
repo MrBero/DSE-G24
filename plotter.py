@@ -2,15 +2,15 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot_just_field(X_positions, Xtrue_mean_mags, title, flat=True):
-    fig2, ax2 = plt.subplots()
-    fig2.suptitle(title)
+def plot_just_field(ax, X_positions, Xtrue_mean_mags, title, flat=True):
+    ax.set_title(title)
     if flat:
-        sc = ax2.scatter(X_positions[::2,0], X_positions[::2,1],  c=Xtrue_mean_mags, cmap='RdBu')
+        sc = ax.scatter(X_positions[::2,0], X_positions[::2,1],  c=Xtrue_mean_mags, cmap='RdBu')
     else: 
-        sc = ax2.scatter(X_positions[:,0], X_positions[:,1],  c=Xtrue_mean_mags, cmap='RdBu')
-    plt.colorbar(sc, ax=ax2)
-    
+        sc = ax.scatter(X_positions[:,0], X_positions[:,1],  c=Xtrue_mean_mags, cmap='RdBu')
+    plt.colorbar(sc, ax=ax)
+    return ax
+
 def plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_alpha, truth_alpha):
     # # quick visual: histograms before vs after
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
@@ -58,9 +58,9 @@ def plot_error_field(X_positions, Xtrue_mean_mags, X_mean_mags, drone_xy_snapped
     # print(np.min(Xtrue_mean_mags - X_mean_mags))
     fig, ax = plt.subplots()
     fig.suptitle("X_true minus X after ENKF")
-    err = Xtrue_mean_mags - X_mean_mags
-    err_min = np.min(Xtrue_mean_mags[:-2:] - X_mean_mags[:-2:])
-    err_max = np.max(Xtrue_mean_mags[:-2:] - X_mean_mags[:-2:])
+    err = X_mean_mags - Xtrue_mean_mags
+    err_min = np.min(X_mean_mags[:-2:] - Xtrue_mean_mags[:-2:])
+    err_max = np.max(X_mean_mags[:-2:] - Xtrue_mean_mags[:-2:])
     sc = ax.scatter(X_positions[::2,0], X_positions[::2,1], c=err, cmap='RdBu',
                     vmin=err_min, vmax=err_max)
     ax.scatter(drone_xy_snapped[:,0], drone_xy_snapped[:,1], c='green')

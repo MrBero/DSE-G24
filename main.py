@@ -20,7 +20,7 @@ def main():
     #simulations
     U_inlet_lst = []
     alpha_lst = []
-    directory = os.path.join(case_folder, 'simulation_outputs') #CHANGE THE BASE CFDS TO THE UPDATED ONES
+    directory = os.path.join(case_folder, 'CORRECTED_simulation_outputs') #CHANGE THE BASE CFDS TO THE UPDATED ONES
     for f in os.listdir(directory):
         # print(f)
         string = f.split(sep='_')
@@ -30,7 +30,7 @@ def main():
     U_inlet_lst = np.array(U_inlet_lst)
     alpha_lst = np.array(alpha_lst)
 
-    path_lst = [os.path.join(case_folder, 'simulation_outputs', file, 'solution_data.csv') for file in os.listdir(directory)]
+    path_lst = [os.path.join(directory, file, 'solution_data.csv') for file in os.listdir(directory)]
     #truths 
     truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
     truth_U_inlet, truth_alpha = 14.5, -14.5
@@ -40,14 +40,15 @@ def main():
 
     #drone distributions
     dims = (800, 500)
-    point_distribution = 'ENKF_2lines.json'
-    # with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
-    #     drone_xy = np.array(json.load(f)['xy'])
-    #     # print(drone_xy['xy'])
-
-    n_samples = 40
-    drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
-                          np.random.random(n_samples) * dims[1] - dims[1]/2]).T
+    point_distribution = 'ENKF_points.json'
+    if point_distribution == 'random':
+        n_samples = 40
+        drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
+                            np.random.random(n_samples) * dims[1] - dims[1]/2]).T
+    else:
+        with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
+            drone_xy = np.array(json.load(f)['xy'])
+            # print(drone_xy['xy'])
 
     # generate synthetic measurements from the truth case
     y_measured, obs_indices, drone_xy_snapped = make_drone_observations(
@@ -86,16 +87,20 @@ def main():
     
     print("=== Results ===")
     print(f'POINT DISTRIBUTION: {point_distribution}')
-    print(f"Number of samples: {len(y_measured)}")
-    print(f"Number of elements per CFD: {X_analysis.shape}")
-    print(f"Truth inlet velocity: {truth_U_inlet:.3f}")
-    print(f"Initial mean inlet: {U_inlet_lst.mean():.3f}")
-    print(f"Final mean inlet: {analysis_inlet.mean():.3f}")
-    print(f"Final std inlet: {analysis_inlet.std():.3f}")
-    print(f"Truth AoA: {truth_alpha:.3f}")
-    print(f"Forecast mean AoA: {alpha_lst.mean():.3f}")
-    print(f"Final mean AoA: {analysis_alpha.mean():.3f}")
-    print(f"Final std AoA: {analysis_alpha.std():.3f}")
+    print(f"Number of samples: {len(y_measured)/2}")
+    print(f"Size of state matrix: {X_analysis.shape}\n")
+
+    print(f"Truth inlet velocity: {truth_U_inlet:.3f} [m/s]")
+    print(f"Truth AoA: {truth_alpha:.3f} [deg]\n")
+
+    print(f"Initial mean inlet: {U_inlet_lst.mean():.3f} [m/s]")
+    print(f"Initial mean AoA: {alpha_lst.mean():.3f} [deg]\n")
+    
+    print(f"Final mean inlet: {analysis_inlet.mean():.3f} [m/s]")
+    print(f"Final std inlet: {analysis_inlet.std():.3f} [m/s]\n")
+    
+    print(f"Final mean AoA: {analysis_alpha.mean():.3f} [deg]")
+    print(f"Final std AoA: {analysis_alpha.std():.3f} [deg]\n")
 
     # print(dX_analysis)
     # print(mean_corr)
@@ -111,10 +116,13 @@ def main():
     Xtrue_positions = np.vstack([xtrue, ytrue]).T
     Xtrue_mags = np.sqrt(utrue**2 + vtrue**2)
     plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_alpha, truth_alpha)
-    plot_just_field(Xtrue_positions, Xtrue_mags, title = 'Truth', flat = False)
-    plot_just_field(X_positions, Xinitial_mean_mags, title = "Initial Means")
-    plot_just_field(X_positions, X_mean_mags, title = "Final Means")
-    # plot_error_field(X_positions, Xtrue_mean_mags, X_mean_mags, drone_xy_snapped)
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    fig.tight_layout()
+    plot_just_field(axes[0], Xtrue_positions, Xtrue_mags, title = 'Truth', flat = False)
+    plot_just_field(axes[1], X_positions, Xinitial_mean_mags, title = "Initial Means")
+    plot_just_field(axes[2], X_positions, X_mean_mags, title = "Final Means")
+    plot_error_field(X_positions, Xinitial_mean_mags, X_mean_mags, drone_xy_snapped)
     
     plt.show()
     
