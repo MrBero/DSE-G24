@@ -12,20 +12,39 @@ def plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_al
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     bins = np.arange(min(U_inlet_lst) - 1, max(U_inlet_lst), 1)
     # print(U_inlet_lst)
-    axes[0].boxplot(U_inlet_lst, label='initial')
-    axes[0].boxplot(analysis_inlet, label='result')
+    axes[0].boxplot(U_inlet_lst, label='initial', patch_artist=True,
+                                  boxprops=dict(facecolor='none', color='steelblue', linewidth=2),
+                                  medianprops=dict(color='steelblue', linewidth=2),
+                                  whiskerprops=dict(color='steelblue', linewidth=2),
+                                  capprops=dict(color='steelblue', linewidth=2),
+                                  flierprops=dict(markeredgecolor='steelblue', markerfacecolor='none', marker='o'))
+    
+    axes[0].boxplot(analysis_inlet, label='result', patch_artist=True,
+                                  boxprops=dict(facecolor='none', color='tomato', linewidth=2),
+                                  medianprops=dict(color='tomato', linewidth=2),
+                                  whiskerprops=dict(color='tomato', linewidth=2),
+                                  capprops=dict(color='tomato', linewidth=2),
+                                  flierprops=dict(markeredgecolor='tomato', markerfacecolor='none', marker='o'))
     axes[0].axhline(truth_U_inlet, color='black', linestyle='--', label='truth')
-    axes[0].set_xlabel('Inlet velocity')
-    axes[0].set_ylabel('Count')
+    axes[0].set_ylabel('Inlet velocity')
     axes[0].legend()
     axes[0].set_title('Inlet velocity: before vs after')
     
     bins = np.arange(min(alpha_lst) - 1, max(alpha_lst), 1)
-    axes[1].boxplot(alpha_lst, label='initial')
-    axes[1].boxplot(analysis_alpha, label='result')
+    axes[1].boxplot(alpha_lst, label='initial', patch_artist=True,
+                                  boxprops=dict(facecolor='none', color='steelblue', linewidth=2),
+                                  medianprops=dict(color='steelblue', linewidth=2),
+                                  whiskerprops=dict(color='steelblue', linewidth=2),
+                                  capprops=dict(color='steelblue', linewidth=2),
+                                  flierprops=dict(markeredgecolor='steelblue', markerfacecolor='none', marker='o'))
+    axes[1].boxplot(analysis_alpha, label='result', patch_artist=True,
+                                  boxprops=dict(facecolor='none', color='tomato', linewidth=2),
+                                  medianprops=dict(color='tomato', linewidth=2),
+                                  whiskerprops=dict(color='tomato', linewidth=2),
+                                  capprops=dict(color='tomato', linewidth=2),
+                                  flierprops=dict(markeredgecolor='tomato', markerfacecolor='none', marker='o'))
     axes[1].axhline(truth_alpha, color='black', linestyle='--', label='truth')
-    axes[1].set_xlabel('AoA')
-    axes[1].set_ylabel('Count')
+    axes[1].set_ylabel('AoA')
     axes[1].legend()
     axes[1].set_title('AoA: before vs after')
     

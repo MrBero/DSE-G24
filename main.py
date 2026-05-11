@@ -17,6 +17,7 @@ NOISE_STD = 0.15
 fake = False
 
 def main():
+    #simulations
     U_inlet_lst = []
     alpha_lst = []
     directory = os.path.join(case_folder, 'simulation_outputs')
@@ -28,22 +29,25 @@ def main():
         alpha_lst.append(float(string[3]))
     U_inlet_lst = np.array(U_inlet_lst)
     alpha_lst = np.array(alpha_lst)
+
     path_lst = [os.path.join(case_folder, 'simulation_outputs', file, 'solution_data.csv') for file in os.listdir(directory)]
-    truth_path = os.path.join(case_folder, 'solution_data_truth13.csv')
-    # print(path_lst, truth_path, U_inlet_lst, alpha_lst)
+    #truths 
+    truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
+    truth_U_inlet, truth_alpha = 14.5, -14.5
+
     X_positions, X_ensemble = load_all_cfds(path_lst, U_inlet_lst, alpha_lst)
-    truth_U_inlet, truth_alpha = 13, -13
     print('CFDs loaded!')
 
     #drone distributions
     dims = (800, 500)
-    point_distribution = 'ENKF_points.json'
-    # n_samples = 20
-    # drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
-    #                       np.random.random(n_samples) * dims[1] - dims[1]/2]).T
-    with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
-        drone_xy = np.array(json.load(f)['xy'])
-        # print(drone_xy['xy'])
+    point_distribution = 'ENKF_2lines.json'
+    # with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
+    #     drone_xy = np.array(json.load(f)['xy'])
+    #     # print(drone_xy['xy'])
+
+    n_samples = 100
+    drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
+                          np.random.random(n_samples) * dims[1] - dims[1]/2]).T
 
     # generate synthetic measurements from the truth case
     y_measured, obs_indices, drone_xy_snapped = make_drone_observations(
@@ -56,7 +60,6 @@ def main():
     Xtrue_mean_odd = Xtrue_mean[1::2]
     # X_mean_reshaped = np.vstack([X_mean_even, X_mean_odd])
     Xtrue_mean_mags = np.sqrt(np.pow(Xtrue_mean_even,2) + np.pow(Xtrue_mean_odd, 2))
-    
     
     # slice predicted observations from the ensemble
     y_pred = X_ensemble[obs_indices, :]
