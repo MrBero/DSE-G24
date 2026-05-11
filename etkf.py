@@ -74,7 +74,7 @@ def etkf(X_ensemble, y_measured, y_pred, R_sensor, bar):
     X_analysis = x_mean_analysis + dX_analysis
     bar()
 
-    return X_analysis
+    return X_analysis, dX_analysis, mean_corr
 
 
 if __name__ == "__main__":

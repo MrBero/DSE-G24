@@ -12,10 +12,10 @@ def load_one_cfd(csv_path):
     sort_idx = np.lexsort((data[:, 1], data[:, 0]))
     data = data[sort_idx]
     
-    x = data[:, 0]
-    y = data[:, 1]
-    u = data[:, 2]
-    v = data[:, 3]
+    x = data[:, 1]
+    y = data[:, 2]
+    u = data[:, 3]
+    v = data[:, 4]
     
     return x, y, u, v
 
@@ -79,5 +79,6 @@ def load_all_cfds(path_lst, U_inlet_lst, alpha_lst):
     # M_data is just M without the first two columns
     M_data = M[:, 2:]
     M_drones = M[:,:2]
+    print(f'Coords shape: {M_drones.shape}, States shape: {M_data.shape}')
     return M_drones, M_data
 
