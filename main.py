@@ -46,7 +46,7 @@ def main(directory, truth_path, point_distribution, dims, n_samples):
     elif point_distribution == 'optimized':
         xcoord = X_positions[:, 0]
         ycoord = X_positions[:, 1]
-        drone_xy, = pick_informative_drones(X_ensemble, xcoord, ycoord, NOISE_STD, U_inf_row=-2, alpha_row=-1)
+        drone_xy,_ = pick_informative_drones(X_ensemble, xcoord, ycoord, NOISE_STD, U_inf_row=-2, alpha_row=-1)
         
     else:
         with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
