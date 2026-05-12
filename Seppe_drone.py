@@ -86,13 +86,30 @@ def pick_informative_drones(X_ensemble, cell_x, cell_y, R, n_drones,
     # each term is the fraction of that parameter's variance reduced,
     # so they can be added directly regardless of physical units.
     score = reduction_Uinf / var_Uinf + reduction_alpha / var_alpha
-    
-    # rank cells by score and pick the top n_drones
-    top_cells = np.argsort(score)[::-1][:n_drones]
-    
-    # convert cell indices to (x, y) positions
-    drone_xy = np.column_stack([cell_x[top_cells], cell_y[top_cells]])
-    
+
+    # sort all cell indices by score, highest first
+    sorted_idx = np.argsort(score)[::-1]
+
+    min_dist = 5.0
+    selected = []  # list of (x, y) tuples
+
+    for idx in sorted_idx:
+        if len(selected) == n_drones:
+            break
+
+        x, y = cell_x[idx], cell_y[idx]
+
+        # check distance to all already-selected drones
+        if selected:
+            sel_arr = np.asarray(selected)
+            dists = np.hypot(sel_arr[:, 0] - x, sel_arr[:, 1] - y)
+            if np.any(dists < min_dist):
+                continue  # too close, skip this cell
+
+        selected.append((x, y))
+
+
+    drone_xy = np.asarray(selected) 
     return drone_xy, score
 
 

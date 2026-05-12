@@ -44,10 +44,18 @@ def main(directory, truth_path, point_distribution, dims, n_samples):
         drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
                             np.random.random(n_samples) * dims[1] - dims[1]/2]).T
     elif point_distribution == 'optimized':
-        xcoord = X_positions[:, 0]
-        ycoord = X_positions[:, 1]
-        drone_xy,_ = pick_informative_drones(X_ensemble, xcoord, ycoord, NOISE_STD, U_inf_row=-2, alpha_row=-1)
-        drone_xy = drone_xy[:n_samples, :]
+        n_cells = (X_ensemble.shape[0] - 2) // 2
+        xcoord = X_positions[0:2 * n_cells:2, 0]
+        ycoord = X_positions[0:2 * n_cells:2, 1]
+        drone_xy, score = pick_informative_drones(X_ensemble, xcoord, ycoord, NOISE_STD**2, n_samples, U_inf_row=-2, alpha_row=-1)
+
+        plt.figure(figsize=(10, 8))
+        # Use 'scatter' with your sorted arrays
+        # 's' controls point size, 'c' is the color depth, 'cmap' is the color theme
+        plt.scatter(xcoord, ycoord, c=score, s=10, cmap='hot', edgecolors='none')
+        plt.colorbar(label='Intensity Score')
+        plt.title("Point-based Heat Map")
+        plt.show()
     else:
         with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
             drone_xy = np.array(json.load(f)['xy'])
@@ -63,7 +71,7 @@ def main(directory, truth_path, point_distribution, dims, n_samples):
     Xinitial_mean_even = Xinitial_mean[::2]
     Xinitial_mean_odd = Xinitial_mean[1::2]
     # X_mean_reshaped = np.vstack([X_mean_even, X_mean_odd])
-    Xinitial_mean_mags = np.sqrt(np.pow(Xinitial_mean_even,2) + np.pow(Xinitial_mean_odd, 2))
+    Xinitial_mean_mags = np.sqrt(Xinitial_mean_even**2 + Xinitial_mean_odd**2)
     
     # slice predicted observations from the ensemble
     y_pred = X_ensemble[obs_indices, :]
@@ -85,7 +93,7 @@ def main(directory, truth_path, point_distribution, dims, n_samples):
     X_mean_even = X_mean[::2]
     X_mean_odd = X_mean[1::2]
     # X_mean_reshaped = np.vstack([X_mean_even, X_mean_odd])
-    X_mean_mags = np.sqrt(np.pow(X_mean_even,2) + np.pow(X_mean_odd, 2))
+    X_mean_mags = np.sqrt(X_mean_even**2 + X_mean_odd**2)
 
     
     print("=== Results ===")
@@ -107,7 +115,6 @@ def main(directory, truth_path, point_distribution, dims, n_samples):
 
     # print(dX_analysis)
     # print(mean_corr)
-    
     # success check
     inlet_improvement = abs(analysis_inlet.mean() - truth_U_inlet) < abs(U_inlet_lst.mean() - truth_U_inlet)
     alpha_improvement = abs(analysis_alpha.mean() - truth_alpha)   < abs(alpha_lst.mean()   - truth_alpha)
@@ -119,13 +126,14 @@ def main(directory, truth_path, point_distribution, dims, n_samples):
     Xtrue_positions = np.vstack([xtrue, ytrue]).T
     Xtrue_mags = np.sqrt(utrue**2 + vtrue**2)
     plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_alpha, truth_alpha)
-
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    fig.tight_layout()
-    plot_just_field(axes[0], Xtrue_positions, Xtrue_mags, title = 'Truth', flat = False)
-    plot_just_field(axes[1], X_positions, Xinitial_mean_mags, title = "Initial Means")
-    plot_just_field(axes[2], X_positions, X_mean_mags, title = "Final Means")
     plot_error_field(X_positions, Xinitial_mean_mags, X_mean_mags, drone_xy_snapped)
+    
+
+    #fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    #fig.tight_layout()
+    #plot_just_field(axes[0], Xtrue_positions, Xtrue_mags, title = 'Truth', flat = False)
+    #plot_just_field(axes[1], X_positions, Xinitial_mean_mags, title = "Initial Means")
+    #plot_just_field(axes[2], X_positions, X_mean_mags, title = "Final Means")
     
     plt.show()
     
@@ -137,6 +145,6 @@ if __name__ == "__main__":
     
     main(directory = directory, 
          truth_path = truth_path,
-         point_distribution = 'random',
+         point_distribution = 'optimized',
          dims = (800, 500),
          n_samples = 40)
