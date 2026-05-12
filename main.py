@@ -16,11 +16,10 @@ case_folder = 'sim'
 NOISE_STD = 0.15
 fake = False
 
-def main():
+def main(directory, truth_path, point_distribution, dims, n_samples):
     #simulations
     U_inlet_lst = []
     alpha_lst = []
-    directory = os.path.join(case_folder, 'CORRECTED_simulation_outputs') #CHANGE THE BASE CFDS TO THE UPDATED ONES
     for f in os.listdir(directory):
         # print(f)
         string = f.split(sep='_')
@@ -32,24 +31,19 @@ def main():
 
     path_lst = [os.path.join(directory, file, 'solution_data.csv') for file in os.listdir(directory)]
     #truths 
-    truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
     truth_U_inlet, truth_alpha = 14.5, -14.5
 
-    X_positions, X_ensemble = load_all_cfds(path_lst, U_inlet_lst, alpha_lst)
+    X_positions, X_ensemble, xref, yref = load_all_cfds(path_lst, U_inlet_lst, alpha_lst)
     print('CFDs loaded!')
 
-    #drone distributions
-    dims = (800, 500)
-    point_distribution = 'random'
     #point_distribution = 'optimized'
     if point_distribution == 'random':
         seed = sum([ord(char) for char in 'PEACH_VIBE'])
         np.random.seed(seed)
-        n_samples = 40
         drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
                             np.random.random(n_samples) * dims[1] - dims[1]/2]).T
-    elif point_distribution == 'optimized':
-        Seppe_drone()
+    # elif point_distribution == 'optimized':
+    #     Seppe_drone()
     
     else:
         with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
@@ -135,4 +129,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    directory = os.path.join(case_folder, 'CORRECTED_simulation_outputs')
+    truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
+    
+    main(directory = directory, 
+         truth_path = truth_path,
+         point_distribution = 'random',
+         dims = (800, 500),
+         n_samples = 40)
