@@ -2,7 +2,7 @@ import numpy as np
 from load import load_all_cfds
 
 
-def pick_informative_drones(X_ensemble, cell_x, cell_y, n_cells, R, n_drones,
+def pick_informative_drones(X_ensemble, cell_x, cell_y, R, n_drones,
                             U_inf_row=-2, alpha_row=-1):
     """
     Pick the n_drones cell locations that, if measured, would reduce
@@ -43,7 +43,9 @@ def pick_informative_drones(X_ensemble, cell_x, cell_y, n_cells, R, n_drones,
     N = X_ensemble.shape[1]                                 #amount of cfds
     x_mean = X_ensemble.mean(axis=1, keepdims=True)         #means of the row
     delta_X = X_ensemble - x_mean                           #delta X
-    
+    n_cells = cell_x.shape[0]
+
+
     # extract parameter deviations (one number per ensemble member)
     delta_Uinf  = delta_X[U_inf_row, :]    # (N,)
     delta_alpha = delta_X[alpha_row, :]    # (N,)

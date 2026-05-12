@@ -7,6 +7,7 @@ from load import load_all_cfds, load_one_cfd
 from drone_sampling import make_drone_observations
 from etkf import etkf
 from plotter import plot_just_field, plot_error_field, plot_hist
+from Seppe_drone import pick_informative_drones
 
 from alive_progress import alive_bar
 
@@ -33,7 +34,7 @@ def main(directory, truth_path, point_distribution, dims, n_samples):
     #truths 
     truth_U_inlet, truth_alpha = 14.5, -14.5
 
-    X_positions, X_ensemble, xref, yref = load_all_cfds(path_lst, U_inlet_lst, alpha_lst)
+    X_positions, X_ensemble, _, _ = load_all_cfds(path_lst, U_inlet_lst, alpha_lst)
     print('CFDs loaded!')
 
     #point_distribution = 'optimized'
@@ -42,9 +43,11 @@ def main(directory, truth_path, point_distribution, dims, n_samples):
         np.random.seed(seed)
         drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
                             np.random.random(n_samples) * dims[1] - dims[1]/2]).T
-    # elif point_distribution == 'optimized':
-    #     Seppe_drone()
-    
+    elif point_distribution == 'optimized':
+        xcoord = X_positions[:, 0]
+        ycoord = X_positions[:, 1]
+        drone_xy, = pick_informative_drones(X_ensemble, xcoord, ycoord, NOISE_STD, U_inf_row=-2, alpha_row=-1)
+        
     else:
         with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
             drone_xy = np.array(json.load(f)['xy'])
