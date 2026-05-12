@@ -40,8 +40,10 @@ def main():
 
     #drone distributions
     dims = (800, 500)
-    point_distribution = 'ENKF_points.json'
+    point_distribution = 'random'
     if point_distribution == 'random':
+        seed = sum([ord(char) for char in 'PEACH_VIBE'])
+        np.random.seed(seed)
         n_samples = 40
         drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
                             np.random.random(n_samples) * dims[1] - dims[1]/2]).T
