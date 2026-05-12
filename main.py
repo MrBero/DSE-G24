@@ -41,12 +41,16 @@ def main():
     #drone distributions
     dims = (800, 500)
     point_distribution = 'random'
+    #point_distribution = 'optimized'
     if point_distribution == 'random':
         seed = sum([ord(char) for char in 'PEACH_VIBE'])
         np.random.seed(seed)
         n_samples = 40
         drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
                             np.random.random(n_samples) * dims[1] - dims[1]/2]).T
+    elif point_distribution == 'optimized':
+        Seppe_drone()
+    
     else:
         with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
             drone_xy = np.array(json.load(f)['xy'])

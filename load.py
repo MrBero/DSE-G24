@@ -80,5 +80,5 @@ def load_all_cfds(path_lst, U_inlet_lst, alpha_lst):
     M_data = M[:, 2:]
     M_drones = M[:,:2]
     print(f'Coords shape: {M_drones.shape}, States shape: {M_data.shape}')
-    return M_drones, M_data
+    return M_drones, M_data, x_ref, y_ref
 
