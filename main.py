@@ -36,7 +36,7 @@ def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_a
         plt.figure(figsize=(10, 8))
         # Use 'scatter' with your sorted arrays
         # 's' controls point size, 'c' is the color depth, 'cmap' is the color theme
-        plt.scatter(xcoord, ycoord, c=score, s=10, cmap='hot', edgecolors='none')
+        plt.scatter(xcoord, ycoord, c=score, s=10, cmap='cool', edgecolors='none')
         plt.colorbar(label='Intensity Score')
         plt.title("Point-based Heat Map")
         plt.show()
