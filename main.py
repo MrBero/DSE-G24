@@ -11,35 +11,38 @@ from Seppe_drone import pick_informative_drones
 
 from alive_progress import alive_bar
 
-
-# parameters used by generate_fake_cfd.py
-case_folder = 'sim'
-NOISE_STD = 0.15
-fake = False
-
-def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_alpha, truth_path, point_distribution, dims, n_samples):
+def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_alpha, truth_path, point_distribution, dims, n_samples, plot=False):
+    NOISE_STD = 0.15
     #point_distribution = 'optimized'
+    seed = sum([ord(char) for char in 'PEACH_VIBE'])
+    np.random.seed(seed)
 
     if point_distribution == 'random':
-        seed = sum([ord(char) for char in 'PEACH_VIBE'])
-        drone_xy = sample_trapezium(75, 20, 50, 90 - 14.5, n_samples, excl_w = 15, excl_h = 20) + np.array([107.5,0])
-        # print(drone_xy)
-        # np.random.seed(seed)
-        # drone_xy = np.vstack([np.random.random(n_samples) * dims[0], 
-        #                     np.random.random(n_samples) * dims[1] - dims[1]/2]).T
+        drone_xy = sample_points(n_samples, (0, dims[0]), (-dims[1]/2, dims[1]/2), (107.5,0), truth_alpha, 
+                                 100, 150, 50, 
+                                 (107.5,0), 12.5)
+
     elif point_distribution == 'optimized':
         n_cells = (X_ensemble.shape[0] - 2) // 2
         xcoord = X_positions[0:2 * n_cells:2, 0]
         ycoord = X_positions[0:2 * n_cells:2, 1]
         drone_xy, score = pick_informative_drones(X_ensemble, xcoord, ycoord, NOISE_STD**2, n_samples, U_inf_row=-2, alpha_row=-1)
 
-        plt.figure(figsize=(10, 8))
-        # Use 'scatter' with your sorted arrays
-        # 's' controls point size, 'c' is the color depth, 'cmap' is the color theme
-        plt.scatter(xcoord, ycoord, c=score, s=10, cmap='hot', edgecolors='none')
-        plt.colorbar(label='Intensity Score')
-        plt.title("Point-based Heat Map")
-        plt.show()
+        # plt.figure(figsize=(10, 8))
+        # # Use 'scatter' with your sorted arrays
+        # # 's' controls point size, 'c' is the color depth, 'cmap' is the color theme
+        # plt.scatter(xcoord, ycoord, c=score, s=10, cmap='cool', edgecolors='none')
+        # plt.colorbar(label='Intensity Score')
+        # plt.title("Point-based Heat Map")
+        # plt.show()
+    elif point_distribution == 'lines': 
+        num_left = 5
+        num_right = n_samples
+        verts = rectangle_vertices(center=(107.5, 0), theta_deg=truth_alpha, s=100, a=150, h=50)
+        left_boundary_pts = np.linspace(verts[0], verts[3], num_left)
+        right_boundary_pts = np.linspace(verts[1], verts[2], num_right)
+        drone_xy = np.vstack([left_boundary_pts, right_boundary_pts])
+    
     else:
         with open(os.path.join('sample-distributions', point_distribution), 'r') as f:
             drone_xy = np.array(json.load(f)['xy'])
@@ -108,19 +111,26 @@ def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_a
     xtrue, ytrue, utrue, vtrue = load_one_cfd(truth_path)
     Xtrue_positions = np.vstack([xtrue, ytrue]).T
     Xtrue_mags = np.sqrt(utrue**2 + vtrue**2)
-    # plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_alpha, truth_alpha)
+    if plot:
+        
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        fig.tight_layout()
+        plot_just_field(axes[0], Xtrue_positions, Xtrue_mags, title = 'Truth', flat = False)
+        plot_just_field(axes[1], X_positions, Xinitial_mean_mags, title = "Initial Means")
+        plot_just_field(axes[2], X_positions, X_mean_mags, title = "Final Means")
+        
+        fig2 = plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_alpha, truth_alpha)
+        fig3 = plot_error_field(X_positions, Xinitial_mean_mags, X_mean_mags, drone_xy)
 
-    # fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    # fig.tight_layout()
-    # plot_just_field(axes[0], Xtrue_positions, Xtrue_mags, title = 'Truth', flat = False)
-    # plot_just_field(axes[1], X_positions, Xinitial_mean_mags, title = "Initial Means")
-    # plot_just_field(axes[2], X_positions, X_mean_mags, title = "Final Means")
-    # plot_error_field(X_positions, Xinitial_mean_mags, X_mean_mags, drone_xy)
-    plt.show()
+        # plt.show()
+        fig.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}/truth-initial-final_U={truth_U_inlet}_a={truth_alpha}.png')
+        fig2.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}/boxplot_U={truth_U_inlet}_a={truth_alpha}.png')
+        fig3.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}/ENKF-change_U={truth_U_inlet}_a={truth_alpha}.png')
+        print('Figures are saved.')
     return analysis_inlet.mean(), analysis_inlet.std(), analysis_alpha.mean(), analysis_alpha.std()
     
 #load cfds
-def load_main():
+def load_main(directory):
     U_inlet_lst = []
     alpha_lst = []
     for f in os.listdir(directory):
@@ -133,88 +143,145 @@ def load_main():
     alpha_lst = np.array(alpha_lst)
 
     path_lst = [os.path.join(directory, file, 'solution_data.csv') for file in os.listdir(directory)]
-    #truths 
-    truth_U_inlet, truth_alpha = 14.5, -14.5
 
     X_positions, X_ensemble, _, _ = load_all_cfds(path_lst, U_inlet_lst, alpha_lst)
     print('CFDs loaded!')
-    return X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_alpha
+    return X_positions, X_ensemble, U_inlet_lst, alpha_lst
 
-import numpy as np
+def rotmat(theta_deg):
+    """2D rotation matrix for angle in degrees."""
+    th = np.deg2rad(theta_deg)
+    c, s = np.cos(th), np.sin(th)
+    return np.array([[c, -s],
+                     [s,  c]])
 
-def trapezium_verts(h, b1, b2, angle_deg):
-    """Returns 4 vertices of a symmetric trapezoid rotated around center."""
-    verts = np.array([
-        [-b1/2,  h/2],   # bottom-left
-        [ b1/2,  h/2],   # bottom-right
-        [ b2/2, -h/2],   # top-right
-        [-b2/2, -h/2],   # top-left
+def rectangle_vertices(center, theta_deg, s, a, h):
+    """Calculates global (x, y) coordinates for the corners."""
+    x0, y0 = center
+    R = rotmat(theta_deg)
+    corners_local = np.array([
+        [-s, -h],
+        [ a, -h],
+        [ a,  h],
+        [-s,  h],
     ])
-    ang = np.radians(angle_deg)
-    R = np.array([[np.cos(ang), -np.sin(ang)],
-                  [np.sin(ang),  np.cos(ang)]])
-    return verts @ R.T
+    corners_global = corners_local @ R.T + np.array([x0, y0])
+    return corners_global
 
-def sample_trapezium(h, b1, b2, angle_deg, n, excl_w=0, excl_h=0):
-    """
-    excl_w, excl_h: width and height of axis-aligned exclusion rectangle at origin.
-    """
-    verts = trapezium_verts(h, b1, b2, angle_deg)
-    A, B, C, D = verts
+def inside_sampling_region(x, y, center, theta_deg, s, a, h, excl_center, excl_radius):
+    """Boolean mask for points inside rectangle and outside exclusion zone."""
+    x0, y0 = center
+    cx, cy = excl_center
+    th = np.deg2rad(theta_deg)
+    c, sn = np.cos(th), np.sin(th)
+    dx, dy = x - x0, y - y0
+    u =  dx * c + dy * sn
+    v = -dx * sn + dy * c
+    in_rect = (-s <= u) & (u <= a) & (-h <= v) & (v <= h)
+    in_excl = (x - cx) ** 2 + (y - cy) ** 2 <= excl_radius ** 2
+    return in_rect & (~in_excl)
 
-    area1 = 0.5 * abs(np.cross(B - A, C - A))
-    area2 = 0.5 * abs(np.cross(C - A, D - A))
-    total = area1 + area2
+def sample_points(n, xlim, ylim, center, theta_deg, s, a, h, excl_center, excl_radius, seed=42):
+    """Rejection sampling for random interior points."""
+    rng = np.random.default_rng(seed)
+    pts = []
+    while len(pts) < n:
+        xs = rng.uniform(xlim[0], xlim[1], size=5 * n)
+        ys = rng.uniform(ylim[0], ylim[1], size=5 * n)
+        mask = inside_sampling_region(xs, ys, center, theta_deg, s, a, h, excl_center, excl_radius)
+        new_pts = np.column_stack([xs[mask], ys[mask]])
+        pts.extend(new_pts.tolist())
+    return np.array(pts[:n])
 
-    # account for exclusion zone reducing the valid area
-    excl_area = excl_w * excl_h
-    fill_ratio = 1 - excl_area / total  # expected fraction that passes
-    oversample = max(int(1 / fill_ratio * 1.3), 2) if fill_ratio < 1 else 1
+def run_single(truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution, n_samples):
+    inlet_mean, inlet_std, alpha_mean, alpha_std = main(*loaded,
+                                                        truth_U_inlet=truth_U_inlet,
+                                                        truth_alpha=truth_alpha,
+                                                        truth_path = truth_path,
+                                                        point_distribution = point_distribution,
+                                                        dims = (800, 500),
+                                                        n_samples = n_samples,
+                                                        plot=True)
 
-    def sample_triangle(P, Q, R, k):
-        r1 = np.random.random((k, 1))
-        r2 = np.random.random((k, 1))
-        mask = (r1 + r2) > 1
-        r1[mask] = 1 - r1[mask]
-        r2[mask] = 1 - r2[mask]
-        return P + r1 * (Q - P) + r2 * (R - P)
 
-    hw, hh = excl_w / 2, excl_h / 2
-    out = []
-
-    while len(out) < n:
-        k = (n - len(out)) * oversample
-        n1 = int(k * area1 / total)
-        n2 = k - n1
-        pts = np.vstack([
-            sample_triangle(A, B, C, n1),
-            sample_triangle(A, C, D, n2),
-        ])
-        # exclude axis-aligned rectangle at center
-        in_excl = (
-            (pts[:, 0] >= -hw) & (pts[:, 0] <= hw) &
-            (pts[:, 1] >= -hh) & (pts[:, 1] <= hh)
-        )
-        out.append(pts[~in_excl])
-
-    return np.vstack(out)[:n]
-
-if __name__ == "__main__":
-    directory = os.path.join(case_folder, 'CORRECTED_simulation_outputs')
-    truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
-
-    loaded = load_main()
+def run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded):
     results = []
     with alive_bar(100) as bar:
-        for n in np.arange(50, 101, 1):
+        for n in np.arange(1, 101, 1):
             inlet_mean, inlet_std, alpha_mean, alpha_std = main(*loaded,
+                                                                truth_U_inlet=truth_U_inlet,
+                                                                truth_alpha=truth_alpha,
                                                                 truth_path = truth_path,
-                                                                point_distribution = 'optimized',
+                                                                point_distribution = 'random',
                                                                 dims = (800, 500),
                                                                 n_samples = n)
             results.append([n, inlet_mean, inlet_std, alpha_mean, alpha_std])
             bar()
     results = np.array(results)
-    plt.plot(results[:,0], results[:, 2])
-    plt.show()
+
+    results_optimized = []
+    with alive_bar(100) as bar:
+        for n in np.arange(1, 101, 1):
+            inlet_mean, inlet_std, alpha_mean, alpha_std = main(*loaded,
+                                                                truth_U_inlet=truth_U_inlet,
+                                                                truth_alpha=truth_alpha,
+                                                                truth_path = truth_path,
+                                                                point_distribution = 'optimized',
+                                                                dims = (800, 500),
+                                                                n_samples = n)
+            results_optimized.append([n, inlet_mean, inlet_std, alpha_mean, alpha_std])
+            bar()
+    results_optimized = np.array(results_optimized)
+
+    results_lines = []
+    with alive_bar(100) as bar:
+        for n in np.arange(1, 101, 1):
+            inlet_mean, inlet_std, alpha_mean, alpha_std = main(*loaded,
+                                                                truth_U_inlet=truth_U_inlet,
+                                                                truth_alpha=truth_alpha,
+                                                                truth_path = truth_path,
+                                                                point_distribution = 'lines',
+                                                                dims = (800, 500),
+                                                                n_samples = n)
+            results_lines.append([n, inlet_mean, inlet_std, alpha_mean, alpha_std])
+            bar()
+    results_lines = np.array(results_lines)
+
+    fig, axes = plt.subplots(1,2)
+    fig.suptitle('Sensitivity study: STD of initial conditions wrt. number of drones')
+
+    axes[0].plot(results[:,0], results[:, 2], label='randomly within zone')
+    axes[0].plot(results_optimized[:,0], results_optimized[:, 2], label='optimized selection')
+    axes[0].plot(results_lines[:,0], results_lines[:, 2], label='line selection')
+    axes[0].set_xlabel('Number of drones')
+    axes[0].set_ylabel('Mean Initial Velocity STD')
+    axes[0].set_title('Inlet velocity')
+
+    axes[1].plot(results[:,0], results[:, 4], label='randomly within zone')
+    axes[1].plot(results_optimized[:,0], results_optimized[:, 4], label='optimized selection')
+    axes[1].plot(results_lines[:,0], results_lines[:, 4], label='line selection')
+    axes[1].set_xlabel('Number of drones')
+    axes[1].set_ylabel('AOA STD')
+    axes[1].set_title('Alpha')
+
+    plt.legend()
+    # plt.show()
+
+    np.savetxt(os.path.join('results',f'std-to-ndrones-sensitivity_U={truth_U_inlet}_a={truth_alpha}.csv'), results, header='n_drones, inlet-mean, inlet-std, alpha-mean, alpha-std')
+
+
+if __name__ == "__main__":
+    case_folder = 'sim'
+    directory = os.path.join(case_folder, 'CORRECTED_simulation_outputs')
+    #truths 
+    truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
+    truth_U_inlet, truth_alpha = 14.5, -14.5
     
+    loaded = load_main(directory)
+    try: 
+        os.mkdir(f'results/U={truth_U_inlet}_a={truth_alpha}')
+    except: 
+        pass
+    run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded)
+    # run_single(truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution='optimized', n_samples=10)
+
