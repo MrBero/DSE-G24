@@ -123,9 +123,9 @@ def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_a
         fig3 = plot_error_field(X_positions, Xinitial_mean_mags, X_mean_mags, drone_xy)
 
         # plt.show()
-        fig.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}/truth-initial-final_U={truth_U_inlet}_a={truth_alpha}.png')
-        fig2.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}/boxplot_U={truth_U_inlet}_a={truth_alpha}.png')
-        fig3.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}/ENKF-change_U={truth_U_inlet}_a={truth_alpha}.png')
+        fig.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}/truth-initial-final_U={truth_U_inlet}_a={truth_alpha}.png')
+        fig2.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}/boxplot_U={truth_U_inlet}_a={truth_alpha}.png')
+        fig3.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}/ENKF-change_U={truth_U_inlet}_a={truth_alpha}.png')
         print('Figures are saved.')
     return analysis_inlet.mean(), analysis_inlet.std(), analysis_alpha.mean(), analysis_alpha.std()
     
@@ -274,19 +274,20 @@ if __name__ == "__main__":
     case_folder = 'sim'
     directory = os.path.join(case_folder, 'CORRECTED_simulation_outputs')
     #truths 
-    truth_path = os.path.join(case_folder, 'solution_data_truth11.6.csv')
-    truth_U_inlet, truth_alpha = 11.6, -11.6
-    
+    truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
+    truth_U_inlet, truth_alpha = 14.5, -14.5
+    point_distribution = 'lines'
+    n_samples = 10
     loaded = load_main(directory)
-    # try: 
-    #     os.mkdir(f'results/U={truth_U_inlet}_a={truth_alpha}')
-    # except: 
-    #     pass
-    # run_single(truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution='optimized', n_samples=10)
-    
     try: 
-        os.mkdir(f'results/sensitivity_U={truth_U_inlet}_a={truth_alpha}')
+        os.mkdir(f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}')
     except: 
         pass
-    run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded)
+    run_single(truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution=point_distribution, n_samples=n_samples)
+    
+    # try: 
+    #     os.mkdir(f'results/sensitivity_U={truth_U_inlet}_a={truth_alpha}')
+    # except: 
+    #     pass
+    # run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded)
 
