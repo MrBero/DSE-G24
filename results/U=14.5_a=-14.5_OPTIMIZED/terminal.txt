@@ -1,0 +1,14 @@
+on 0: === Results ===
+on 0: POINT DISTRIBUTION: optimized
+on 0: Number of samples: 10.0
+on 0: Size of state matrix: (538222, 25)
+on 0: Truth inlet velocity: 14.500 [m/s]
+on 0: Truth AoA: -14.500 [deg]
+on 0: Initial mean inlet: 15.000 [m/s]
+on 0: Initial mean AoA: -15.000 [deg]
+on 0: Final mean inlet: 14.514 [m/s]
+on 0: Final std inlet: 0.041 [m/s]
+on 0: Final mean AoA: -14.475 [deg]
+on 0: Final std AoA: 0.150 [deg]
+on 0: Inlet improved: True
+on 0: AoA improved: True

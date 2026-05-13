@@ -267,21 +267,26 @@ def run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded):
     plt.legend()
     # plt.show()
 
-    np.savetxt(os.path.join('results',f'std-to-ndrones-sensitivity_U={truth_U_inlet}_a={truth_alpha}.csv'), results, header='n_drones, inlet-mean, inlet-std, alpha-mean, alpha-std')
-
+    np.savetxt(os.path.join('results',f'sensitivity_U={truth_U_inlet}_a={truth_alpha}', f'std-to-ndrones-sensitivity_U={truth_U_inlet}_a={truth_alpha}.csv'), results, header='n_drones, inlet-mean, inlet-std, alpha-mean, alpha-std')
+    fig.savefig(os.path.join('results', f'sensitivity_U={truth_U_inlet}_a={truth_alpha}', f'std-to-ndrones-sensitivity_U={truth_U_inlet}_a={truth_alpha}.png'))
 
 if __name__ == "__main__":
     case_folder = 'sim'
     directory = os.path.join(case_folder, 'CORRECTED_simulation_outputs')
     #truths 
-    truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
-    truth_U_inlet, truth_alpha = 14.5, -14.5
+    truth_path = os.path.join(case_folder, 'solution_data_truth11.6.csv')
+    truth_U_inlet, truth_alpha = 11.6, -11.6
     
     loaded = load_main(directory)
+    # try: 
+    #     os.mkdir(f'results/U={truth_U_inlet}_a={truth_alpha}')
+    # except: 
+    #     pass
+    # run_single(truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution='optimized', n_samples=10)
+    
     try: 
-        os.mkdir(f'results/U={truth_U_inlet}_a={truth_alpha}')
+        os.mkdir(f'results/sensitivity_U={truth_U_inlet}_a={truth_alpha}')
     except: 
         pass
     run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded)
-    # run_single(truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution='optimized', n_samples=10)
 
