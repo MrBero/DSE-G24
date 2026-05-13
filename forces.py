@@ -1,14 +1,23 @@
 """
-forces.py - Aggregate final aerodynamic forces from CFD simulation runs.
+forces.py - Summarise final aerodynamic forces from CFD simulation runs.
 
 Walks every `sims_(vel_mean_*_aoa_mean_*)` folder inside `forces_visualisation/`,
 reads the last iteration of `forces.txt` for every sub-case, and writes one
-tidy CSV per sims-folder into `forces_output/`, named:
+summary CSV per sims-folder into `forces_output/`, named:
 
     forces_<meanUinlet>_<meanAOA>.csv      e.g.  forces_14.514_-14.475.csv
 
-Each CSV lists, for every sub-case, the input U_inlet and AoA along with a
-label saying whether each input is the mean, mean - 3 sd, or mean + 3 sd.
+Each CSV has 6 rows:
+    fx  lowest        (worst-case lower bound on horizontal force)
+    fx  most likely   (the mean-U, mean-AoA case)
+    fx  highest       (worst-case upper bound)
+    fy  lowest        (same, for vertical force)
+    fy  most likely
+    fy  highest
+
+The 'situation' columns record which (U_inlet, AoA) combination produced
+each bound, with labels saying whether each input is mean, mean - 3 sd,
+or mean + 3 sd.
 
 Paths are resolved relative to this script's own location so the project
 is portable across machines (works for everyone who clones the repo).
@@ -93,11 +102,26 @@ def find_sims_folders(root: Path) -> list[Path]:
     return sorted(folders, key=lambda p: p.name)
 
 
+def _row(quantity: str, bound: str, record: dict) -> dict:
+    """Build one output row from a stored case record."""
+    value = record["fx"] if quantity == "fx" else record["fy"]
+    return {
+        "quantity":         quantity,
+        "bound":            bound,
+        "value [N]":        value,
+        "case":             record["case"],
+        "U_inlet [m/s]":    record["v"],
+        "U_inlet label":    record["v_label"],
+        "AoA [deg]":        record["a"],
+        "AoA label":        record["a_label"],
+    }
+
+
 def process_sims_folder(sims_folder: Path) -> Path | None:
     """
     Process a single sims_(...) folder: read every sub-case's final forces
-    and write a CSV named `forces_<vmean>_<amean>.csv` into OUTPUT_DIR.
-    Returns the CSV path (or None if no usable data was found).
+    and write a 6-row summary CSV named `forces_<vmean>_<amean>.csv` into
+    OUTPUT_DIR. Returns the CSV path (or None if no usable data was found).
     """
     parent_match = PARENT_PATTERN.match(sims_folder.name)
     v_mean = float(parent_match.group("vmean"))
@@ -128,38 +152,61 @@ def process_sims_folder(sims_folder: Path) -> Path | None:
     print(f"  A range:  {a_low}  ...  {a_high}")
     print(f"  cases:    {len(cases)} sub-folder(s)")
 
-    rows = []
+    # Read final forces for every case
+    records: list[dict] = []
     for v, a, sub in cases:
         forces_file = sub / "forces.txt"
         if not forces_file.exists():
             print(f"  warning: {forces_file.relative_to(SCRIPT_DIR)} missing - skipped")
             continue
         fx, fy = read_final_forces(forces_file)
-        rows.append({
-            "case": sub.name,
-            "U_inlet [m/s]": v,
-            "U_inlet label": classify(v, v_mean, v_low, v_high),
-            "AoA [deg]": a,
-            "AoA label": classify(a, a_mean, a_low, a_high),
-            "fx final [N]": fx,
-            "fy final [N]": fy,
+        records.append({
+            "case":    sub.name,
+            "v":       v,
+            "a":       a,
+            "v_label": classify(v, v_mean, v_low, v_high),
+            "a_label": classify(a, a_mean, a_low, a_high),
+            "fx":      fx,
+            "fy":      fy,
         })
 
-    if not rows:
+    if not records:
         print(f"  no usable forces.txt files in {sims_folder.name}")
         return None
 
-    # Tidy ordering: velocity then AoA, both ascending
-    rows.sort(key=lambda r: (r["U_inlet [m/s]"], r["AoA [deg]"]))
+    # Pick out min, max, and the (mean, mean) "most likely" case for each force
+    fx_min = min(records, key=lambda r: r["fx"])
+    fx_max = max(records, key=lambda r: r["fx"])
+    fy_min = min(records, key=lambda r: r["fy"])
+    fy_max = max(records, key=lambda r: r["fy"])
+
+    most_likely = next(
+        (r for r in records if r["v_label"] == "mean" and r["a_label"] == "mean"),
+        None,
+    )
+    if most_likely is None:
+        print(f"  warning: no (mean, mean) case found in {sims_folder.name} - "
+              f"'most likely' rows will be omitted")
+
+    summary_rows = [_row("fx", "lowest", fx_min)]
+    if most_likely is not None:
+        summary_rows.append(_row("fx", "most likely", most_likely))
+    summary_rows.append(_row("fx", "highest", fx_max))
+
+    summary_rows.append(_row("fy", "lowest", fy_min))
+    if most_likely is not None:
+        summary_rows.append(_row("fy", "most likely", most_likely))
+    summary_rows.append(_row("fy", "highest", fy_max))
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT_DIR / f"forces_{v_mean}_{a_mean}.csv"
     with output_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(summary_rows)
 
-    print(f"  -> wrote {len(rows)} rows to {output_path.relative_to(SCRIPT_DIR)}")
+    print(f"  -> wrote {len(summary_rows)} summary rows to "
+          f"{output_path.relative_to(SCRIPT_DIR)}")
     return output_path
 
 
