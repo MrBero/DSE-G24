@@ -1,0 +1,188 @@
+"""
+forces.py - Aggregate final aerodynamic forces from CFD simulation runs.
+
+Walks every `sims_(vel_mean_*_aoa_mean_*)` folder inside `forces_visualisation/`,
+reads the last iteration of `forces.txt` for every sub-case, and writes one
+tidy CSV per sims-folder into `forces_output/`, named:
+
+    forces_<meanUinlet>_<meanAOA>.csv      e.g.  forces_14.514_-14.475.csv
+
+Each CSV lists, for every sub-case, the input U_inlet and AoA along with a
+label saying whether each input is the mean, mean - 3 sd, or mean + 3 sd.
+
+Paths are resolved relative to this script's own location so the project
+is portable across machines (works for everyone who clones the repo).
+"""
+
+from __future__ import annotations
+
+import csv
+import re
+from pathlib import Path
+
+# --- Paths -------------------------------------------------------------------
+
+SCRIPT_DIR = Path(__file__).parent
+SIMS_ROOT = SCRIPT_DIR / "forces_visualisation"
+OUTPUT_DIR = SCRIPT_DIR / "forces_output"
+
+# --- Folder-name patterns ----------------------------------------------------
+
+# Parent folder, e.g.  sims_(vel_mean_14.514_aoa_mean_-14.475)
+PARENT_PATTERN = re.compile(
+    r"sims_\(vel_mean_(?P<vmean>-?\d+(?:\.\d+)?)"
+    r"_aoa_mean_(?P<amean>-?\d+(?:\.\d+)?)\)"
+)
+
+# Case folder, e.g.  v14.391_a-14.025
+CASE_PATTERN = re.compile(
+    r"v(?P<v>-?\d+(?:\.\d+)?)_a(?P<a>-?\d+(?:\.\d+)?)"
+)
+
+# Tolerance when comparing floats parsed from folder names
+TOL = 1e-6
+
+
+# --- Helpers -----------------------------------------------------------------
+
+def classify(value: float, mean: float, low: float, high: float) -> str:
+    """Label a value as 'mean', 'mean - 3sd', or 'mean + 3sd'."""
+    if abs(value - mean) < TOL:
+        return "mean"
+    if abs(value - low) < TOL:
+        return "mean - 3sd"
+    if abs(value - high) < TOL:
+        return "mean + 3sd"
+    return f"other ({value})"
+
+
+def read_final_forces(path: Path) -> tuple[float, float]:
+    """
+    Return (fx, fy) from the last numeric row of a forces.txt file.
+
+    The file has three header lines followed by rows of
+        iteration  fx-building  fy-building
+    separated by whitespace. Header lines are skipped automatically by
+    failing the float() conversion.
+    """
+    last: tuple[float, float] | None = None
+    with path.open() as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            try:
+                fx = float(parts[1])
+                fy = float(parts[2])
+            except ValueError:
+                continue  # header row
+            last = (fx, fy)
+    if last is None:
+        raise ValueError(f"No numeric data found in {path}")
+    return last
+
+
+def find_sims_folders(root: Path) -> list[Path]:
+    """Locate every sims_(...) folder beneath `root`, sorted by name."""
+    if not root.exists():
+        raise FileNotFoundError(f"{root} does not exist")
+    folders = [
+        child for child in root.iterdir()
+        if child.is_dir() and PARENT_PATTERN.match(child.name)
+    ]
+    return sorted(folders, key=lambda p: p.name)
+
+
+def process_sims_folder(sims_folder: Path) -> Path | None:
+    """
+    Process a single sims_(...) folder: read every sub-case's final forces
+    and write a CSV named `forces_<vmean>_<amean>.csv` into OUTPUT_DIR.
+    Returns the CSV path (or None if no usable data was found).
+    """
+    parent_match = PARENT_PATTERN.match(sims_folder.name)
+    v_mean = float(parent_match.group("vmean"))
+    a_mean = float(parent_match.group("amean"))
+
+    # Collect every case folder present
+    cases: list[tuple[float, float, Path]] = []
+    for sub in sims_folder.iterdir():
+        if not sub.is_dir():
+            continue
+        m = CASE_PATTERN.match(sub.name)
+        if m:
+            cases.append((float(m.group("v")), float(m.group("a")), sub))
+
+    if not cases:
+        print(f"  no sub-case folders found in {sims_folder.name}, skipped")
+        return None
+
+    # Smallest = mean - 3sd, largest = mean + 3sd
+    unique_v = sorted({c[0] for c in cases})
+    unique_a = sorted({c[1] for c in cases})
+    v_low, v_high = unique_v[0], unique_v[-1]
+    a_low, a_high = unique_a[0], unique_a[-1]
+
+    print(f"\nProcessing  {sims_folder.name}")
+    print(f"  means:    U_inlet = {v_mean} m/s,  AoA = {a_mean} deg")
+    print(f"  U range:  {v_low}  ...  {v_high}")
+    print(f"  A range:  {a_low}  ...  {a_high}")
+    print(f"  cases:    {len(cases)} sub-folder(s)")
+
+    rows = []
+    for v, a, sub in cases:
+        forces_file = sub / "forces.txt"
+        if not forces_file.exists():
+            print(f"  warning: {forces_file.relative_to(SCRIPT_DIR)} missing - skipped")
+            continue
+        fx, fy = read_final_forces(forces_file)
+        rows.append({
+            "case": sub.name,
+            "U_inlet [m/s]": v,
+            "U_inlet label": classify(v, v_mean, v_low, v_high),
+            "AoA [deg]": a,
+            "AoA label": classify(a, a_mean, a_low, a_high),
+            "fx final [N]": fx,
+            "fy final [N]": fy,
+        })
+
+    if not rows:
+        print(f"  no usable forces.txt files in {sims_folder.name}")
+        return None
+
+    # Tidy ordering: velocity then AoA, both ascending
+    rows.sort(key=lambda r: (r["U_inlet [m/s]"], r["AoA [deg]"]))
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUT_DIR / f"forces_{v_mean}_{a_mean}.csv"
+    with output_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"  -> wrote {len(rows)} rows to {output_path.relative_to(SCRIPT_DIR)}")
+    return output_path
+
+
+# --- Main --------------------------------------------------------------------
+
+def main() -> None:
+    sims_folders = find_sims_folders(SIMS_ROOT)
+    if not sims_folders:
+        raise FileNotFoundError(
+            f"No 'sims_(vel_mean_..._aoa_mean_...)' folders found in {SIMS_ROOT}"
+        )
+
+    print(f"Found {len(sims_folders)} sims-folder(s) in {SIMS_ROOT.name}/")
+
+    written = []
+    for sf in sims_folders:
+        result = process_sims_folder(sf)
+        if result is not None:
+            written.append(result)
+
+    print(f"\nDone. {len(written)} CSV file(s) written to "
+          f"{OUTPUT_DIR.relative_to(SCRIPT_DIR)}/")
+
+
+if __name__ == "__main__":
+    main()
