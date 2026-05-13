@@ -53,6 +53,7 @@ def plot_hist(U_inlet_lst, analysis_inlet, truth_U_inlet, alpha_lst, analysis_al
     axes[1].set_title('AoA: before vs after')
     
     plt.tight_layout()
+    return fig
 
 def plot_error_field(X_positions, Xtrue_mean_mags, X_mean_mags, drone_xy_snapped):
     # print(np.min(Xtrue_mean_mags - X_mean_mags))
@@ -70,6 +71,7 @@ def plot_error_field(X_positions, Xtrue_mean_mags, X_mean_mags, drone_xy_snapped
     # fig2.suptitle('X_true')
     # ax2.scatter(X_positions[::2,0], X_positions[::2,1],  c=Xtrue_mean_mags, cmap='RdBu')
     # ax2.scatter(drone_xy_snapped[:,0], drone_xy_snapped[:,1], c='green')
+    return fig
 
 if __name__ == "__main__":
     for file in os.listdir('solutions'):

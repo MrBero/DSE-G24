@@ -1,0 +1,20 @@
+KEPS RUN
+=== Results ===
+POINT DISTRIBUTION: lines
+Number of samples: 15.0
+Size of state matrix: (538222, 25)
+
+Truth inlet velocity: 11.600 [m/s]
+Truth AoA: -11.600 [deg]
+
+Initial mean inlet: 15.000 [m/s]
+Initial mean AoA: -15.000 [deg]
+
+Final mean inlet: 11.041 [m/s]
+Final std inlet: 0.044 [m/s]
+
+Final mean AoA: -11.946 [deg]
+Final std AoA: 0.141 [deg]
+
+Inlet improved: True
+AoA improved: True
