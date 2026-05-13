@@ -1,0 +1,7 @@
+quantity,bound,value [N],case,U_inlet [m/s],U_inlet label,AoA [deg],AoA label
+fx,lowest,4130.745855720535,v14.391_a-14.925,14.391,mean - 3sd,-14.925,mean - 3sd
+fx,most likely,4213.482164686346,v14.514_a-14.475,14.514,mean,-14.475,mean
+fx,highest,4285.206737845787,v14.637_a-14.475,14.637,mean + 3sd,-14.475,mean
+fy,lowest,379.999615234741,v14.391_a-14.025,14.391,mean - 3sd,-14.025,mean + 3sd
+fy,most likely,410.5908935362686,v14.514_a-14.475,14.514,mean,-14.475,mean
+fy,highest,440.4573579907603,v14.637_a-14.925,14.637,mean + 3sd,-14.925,mean - 3sd

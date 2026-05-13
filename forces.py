@@ -1,25 +1,29 @@
 """
-forces.py - Summarise final aerodynamic forces from CFD simulation runs.
+forces.py - Summarise final aerodynamic forces from CFD simulation runs and
+produce per-component overview plots.
 
-Walks every `sims_(vel_mean_*_aoa_mean_*)` folder inside `forces_visualisation/`,
-reads the last iteration of `forces.txt` for every sub-case, and writes one
-summary CSV per sims-folder into `forces_output/`, named:
+Pipeline (run once, automatically scales with whatever is on disk):
+  1. Walks every `sims_(vel_mean_*_aoa_mean_*)` folder inside
+     `forces_visualisation/`.
+  2. For every sub-case it reads the last iteration of `forces.txt` and
+     extracts the final fx, fy.
+  3. Writes one summary CSV per sims-folder into `forces_output/`, named
+     `forces_<meanUinlet>_<meanAOA>.csv`. Each CSV has 6 rows:
+        fx  lowest / most likely / highest
+        fy  lowest / most likely / highest
+     with the (U_inlet, AoA) situation that produced each bound.
+  4. Aggregates every scenario into two forest-style plots saved to
+     `forces_output/`:
+        forces_fx.png   - one row per scenario, fx in N
+        forces_fy.png   - one row per scenario, fy in N
+     Each row shows the [lowest, highest] whisker, a marker at the
+     'most likely' (mean U, mean AoA) value, and a different-coloured
+     marker at the user-set 'true value' reference.
 
-    forces_<meanUinlet>_<meanAOA>.csv      e.g.  forces_14.514_-14.475.csv
+The plots scale automatically with the number of sims-folders present, so
+dropping in more `sims_(...)` zips and re-running is all that's needed.
 
-Each CSV has 6 rows:
-    fx  lowest        (worst-case lower bound on horizontal force)
-    fx  most likely   (the mean-U, mean-AoA case)
-    fx  highest       (worst-case upper bound)
-    fy  lowest        (same, for vertical force)
-    fy  most likely
-    fy  highest
-
-The 'situation' columns record which (U_inlet, AoA) combination produced
-each bound, with labels saying whether each input is mean, mean - 3 sd,
-or mean + 3 sd.
-
-Paths are resolved relative to this script's own location so the project
+Paths are resolved relative to this script's own location, so the project
 is portable across machines (works for everyone who clones the repo).
 """
 
@@ -29,10 +33,25 @@ import csv
 import re
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+
+# =============================================================================
+# USER-EDITABLE REFERENCE VALUES
+# =============================================================================
+# Edit these when you have measured / wind-tunnel / analytical reference
+# values. They are drawn as a coloured marker on every scenario's whisker so
+# you can see at a glance whether each simulated range brackets the truth.
+# Set to None to hide the reference marker.
+
+TRUE_FX = 4207.07   # [N]  reference horizontal-force value
+TRUE_FY =  411.13   # [N]  reference vertical-force value
+
+# =============================================================================
+
 # --- Paths -------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).parent
-SIMS_ROOT = SCRIPT_DIR / "forces_visualisation"
+SIMS_ROOT  = SCRIPT_DIR / "forces_visualisation"
 OUTPUT_DIR = SCRIPT_DIR / "forces_output"
 
 # --- Folder-name patterns ----------------------------------------------------
@@ -42,7 +61,6 @@ PARENT_PATTERN = re.compile(
     r"sims_\(vel_mean_(?P<vmean>-?\d+(?:\.\d+)?)"
     r"_aoa_mean_(?P<amean>-?\d+(?:\.\d+)?)\)"
 )
-
 # Case folder, e.g.  v14.391_a-14.025
 CASE_PATTERN = re.compile(
     r"v(?P<v>-?\d+(?:\.\d+)?)_a(?P<a>-?\d+(?:\.\d+)?)"
@@ -50,6 +68,13 @@ CASE_PATTERN = re.compile(
 
 # Tolerance when comparing floats parsed from folder names
 TOL = 1e-6
+
+# --- Plot styling ------------------------------------------------------------
+
+COLOR_RANGE        = "#888780"   # whisker line - neutral gray
+COLOR_CAP          = "#185FA5"   # end-cap ticks - blue
+COLOR_MOST_LIKELY  = "#185FA5"   # most-likely marker - blue
+COLOR_TRUE         = "#D85A30"   # true-value marker - coral (distinct hue)
 
 
 # --- Helpers -----------------------------------------------------------------
@@ -103,7 +128,7 @@ def find_sims_folders(root: Path) -> list[Path]:
 
 
 def _row(quantity: str, bound: str, record: dict) -> dict:
-    """Build one output row from a stored case record."""
+    """Build one CSV output row from a stored case record."""
     value = record["fx"] if quantity == "fx" else record["fy"]
     return {
         "quantity":         quantity,
@@ -117,17 +142,20 @@ def _row(quantity: str, bound: str, record: dict) -> dict:
     }
 
 
-def process_sims_folder(sims_folder: Path) -> Path | None:
+def extract_summary(sims_folder: Path):
     """
-    Process a single sims_(...) folder: read every sub-case's final forces
-    and write a 6-row summary CSV named `forces_<vmean>_<amean>.csv` into
-    OUTPUT_DIR. Returns the CSV path (or None if no usable data was found).
-    """
-    parent_match = PARENT_PATTERN.match(sims_folder.name)
-    v_mean = float(parent_match.group("vmean"))
-    a_mean = float(parent_match.group("amean"))
+    Read every sub-case's final forces in `sims_folder` and return
+        (summary_dict, csv_rows)
+    or None if no usable data was found.
 
-    # Collect every case folder present
+    summary_dict contains the numeric values needed for plotting; csv_rows
+    is the 6-row (or 4-row, if no mean-mean case) list ready to write to CSV.
+    """
+    pm = PARENT_PATTERN.match(sims_folder.name)
+    v_mean = float(pm.group("vmean"))
+    a_mean = float(pm.group("amean"))
+
+    # Collect every sub-case folder
     cases: list[tuple[float, float, Path]] = []
     for sub in sims_folder.iterdir():
         if not sub.is_dir():
@@ -135,12 +163,10 @@ def process_sims_folder(sims_folder: Path) -> Path | None:
         m = CASE_PATTERN.match(sub.name)
         if m:
             cases.append((float(m.group("v")), float(m.group("a")), sub))
-
     if not cases:
-        print(f"  no sub-case folders found in {sims_folder.name}, skipped")
+        print(f"  no sub-case folders in {sims_folder.name}, skipped")
         return None
 
-    # Smallest = mean - 3sd, largest = mean + 3sd
     unique_v = sorted({c[0] for c in cases})
     unique_a = sorted({c[1] for c in cases})
     v_low, v_high = unique_v[0], unique_v[-1]
@@ -155,11 +181,11 @@ def process_sims_folder(sims_folder: Path) -> Path | None:
     # Read final forces for every case
     records: list[dict] = []
     for v, a, sub in cases:
-        forces_file = sub / "forces.txt"
-        if not forces_file.exists():
-            print(f"  warning: {forces_file.relative_to(SCRIPT_DIR)} missing - skipped")
+        ff = sub / "forces.txt"
+        if not ff.exists():
+            print(f"  warning: {ff.relative_to(SCRIPT_DIR)} missing - skipped")
             continue
-        fx, fy = read_final_forces(forces_file)
+        fx, fy = read_final_forces(ff)
         records.append({
             "case":    sub.name,
             "v":       v,
@@ -169,16 +195,14 @@ def process_sims_folder(sims_folder: Path) -> Path | None:
             "fx":      fx,
             "fy":      fy,
         })
-
     if not records:
         print(f"  no usable forces.txt files in {sims_folder.name}")
         return None
 
-    # Pick out min, max, and the (mean, mean) "most likely" case for each force
-    fx_min = min(records, key=lambda r: r["fx"])
-    fx_max = max(records, key=lambda r: r["fx"])
-    fy_min = min(records, key=lambda r: r["fy"])
-    fy_max = max(records, key=lambda r: r["fy"])
+    fx_min_rec = min(records, key=lambda r: r["fx"])
+    fx_max_rec = max(records, key=lambda r: r["fx"])
+    fy_min_rec = min(records, key=lambda r: r["fy"])
+    fy_max_rec = max(records, key=lambda r: r["fy"])
 
     most_likely = next(
         (r for r in records if r["v_label"] == "mean" and r["a_label"] == "mean"),
@@ -188,26 +212,116 @@ def process_sims_folder(sims_folder: Path) -> Path | None:
         print(f"  warning: no (mean, mean) case found in {sims_folder.name} - "
               f"'most likely' rows will be omitted")
 
-    summary_rows = [_row("fx", "lowest", fx_min)]
+    # Build the CSV rows
+    csv_rows = [_row("fx", "lowest", fx_min_rec)]
     if most_likely is not None:
-        summary_rows.append(_row("fx", "most likely", most_likely))
-    summary_rows.append(_row("fx", "highest", fx_max))
-
-    summary_rows.append(_row("fy", "lowest", fy_min))
+        csv_rows.append(_row("fx", "most likely", most_likely))
+    csv_rows.append(_row("fx", "highest", fx_max_rec))
+    csv_rows.append(_row("fy", "lowest", fy_min_rec))
     if most_likely is not None:
-        summary_rows.append(_row("fy", "most likely", most_likely))
-    summary_rows.append(_row("fy", "highest", fy_max))
+        csv_rows.append(_row("fy", "most likely", most_likely))
+    csv_rows.append(_row("fy", "highest", fy_max_rec))
 
+    # Build the summary dict used for plotting
+    summary = {
+        "v_mean": v_mean,
+        "a_mean": a_mean,
+        "fx_min": fx_min_rec["fx"],
+        "fx_max": fx_max_rec["fx"],
+        "fy_min": fy_min_rec["fy"],
+        "fy_max": fy_max_rec["fy"],
+        "fx_mid": most_likely["fx"] if most_likely is not None else None,
+        "fy_mid": most_likely["fy"] if most_likely is not None else None,
+    }
+    return summary, csv_rows
+
+
+def write_summary_csv(rows: list[dict], v_mean: float, a_mean: float) -> Path:
+    """Write a per-sims-folder summary CSV into OUTPUT_DIR."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = OUTPUT_DIR / f"forces_{v_mean}_{a_mean}.csv"
-    with output_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(summary_rows)
+    out = OUTPUT_DIR / f"forces_{v_mean}_{a_mean}.csv"
+    with out.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+    print(f"  -> wrote {len(rows)} rows to {out.relative_to(SCRIPT_DIR)}")
+    return out
 
-    print(f"  -> wrote {len(summary_rows)} summary rows to "
-          f"{output_path.relative_to(SCRIPT_DIR)}")
-    return output_path
+
+# --- Plotting ----------------------------------------------------------------
+
+def plot_component(summaries: list[dict], component: str) -> None:
+    """
+    Make a single forest-style plot for either 'fx' or 'fy'.
+    One row per scenario, scaling automatically with len(summaries).
+    """
+    assert component in ("fx", "fy")
+    true_val = TRUE_FX if component == "fx" else TRUE_FY
+    nice_name = "Horizontal force fx" if component == "fx" else "Vertical force fy"
+
+    n = len(summaries)
+    if n == 0:
+        return
+
+    # Height grows with the number of scenarios; width is constant
+    fig_h = max(2.6, 0.85 * n + 1.6)
+    fig, ax = plt.subplots(figsize=(9, fig_h))
+
+    labels = []
+    for i, s in enumerate(summaries):
+        y = n - 1 - i  # first scenario on top
+        lo = s[f"{component}_min"]
+        hi = s[f"{component}_max"]
+        mid = s[f"{component}_mid"]
+
+        # Whisker line (lowest <-> highest)
+        ax.hlines(y, lo, hi, color=COLOR_RANGE, linewidth=1.6, alpha=0.55,
+                  zorder=2)
+        # End caps
+        cap_h = 0.18
+        ax.vlines([lo, hi], y - cap_h, y + cap_h, color=COLOR_CAP,
+                  linewidth=1.6, zorder=3)
+        # Most-likely marker
+        if mid is not None:
+            ax.plot(mid, y, "o", color=COLOR_MOST_LIKELY, markersize=8,
+                    zorder=4,
+                    label="most likely (mean U, mean AoA)" if i == 0 else None)
+        # True-value reference marker (different colour)
+        if true_val is not None:
+            ax.plot(true_val, y, "o", color=COLOR_TRUE, markersize=8,
+                    zorder=4,
+                    label="true value (reference)" if i == 0 else None)
+
+        labels.append(f"U = {s['v_mean']} m/s\nAoA = {s['a_mean']}\u00b0")
+
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(list(reversed(labels)))
+    ax.set_xlabel(f"{component} [N]")
+    title = f"{nice_name} - bounds per scenario"
+    if true_val is not None:
+        title += f"    (reference = {true_val:.2f} N)"
+    ax.set_title(title)
+    ax.grid(axis="x", linestyle=":", alpha=0.35)
+    ax.set_ylim(-0.7, n - 0.3)
+    ax.legend(loc="best", framealpha=0.9, fontsize=9)
+
+    fig.tight_layout()
+    out = OUTPUT_DIR / f"forces_{component}.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> wrote {out.relative_to(SCRIPT_DIR)}")
+
+
+def plot_all(summaries: list[dict]) -> None:
+    """Produce both fx and fy summary plots."""
+    if not summaries:
+        print("\nNothing to plot.")
+        return
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"\nPlotting summary figures "
+          f"(reference fx = {TRUE_FX} N, fy = {TRUE_FY} N)")
+    plot_component(summaries, "fx")
+    plot_component(summaries, "fy")
 
 
 # --- Main --------------------------------------------------------------------
@@ -218,17 +332,20 @@ def main() -> None:
         raise FileNotFoundError(
             f"No 'sims_(vel_mean_..._aoa_mean_...)' folders found in {SIMS_ROOT}"
         )
-
     print(f"Found {len(sims_folders)} sims-folder(s) in {SIMS_ROOT.name}/")
 
-    written = []
+    summaries: list[dict] = []
     for sf in sims_folders:
-        result = process_sims_folder(sf)
-        if result is not None:
-            written.append(result)
+        result = extract_summary(sf)
+        if result is None:
+            continue
+        summary, csv_rows = result
+        write_summary_csv(csv_rows, summary["v_mean"], summary["a_mean"])
+        summaries.append(summary)
 
-    print(f"\nDone. {len(written)} CSV file(s) written to "
-          f"{OUTPUT_DIR.relative_to(SCRIPT_DIR)}/")
+    plot_all(summaries)
+
+    print(f"\nDone. {len(summaries)} scenario(s) processed.")
 
 
 if __name__ == "__main__":
