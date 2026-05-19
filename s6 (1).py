@@ -221,7 +221,7 @@ def safe_chol(K,lbl=""):
 # 1D non-periodic M52
 def _m52_1d(s1,s2,var,ell):
     r=np.abs(s1[:,None]-s2[None,:])/(ell+1e-30); s=np.sqrt(5.)*r
-    return var*(1.+s+s**2/3.)*np.exp(-s)
+    return var*(1.+s+(s**2)/3.)*np.exp(-s)
 
 def fit_np(s,y,noise=1e-5):
     n=len(s); y=np.asarray(y,float); mu=y.mean(); yc=y-mu
@@ -243,7 +243,7 @@ def pred_np(m,sq): return _m52_1d(sq,m["s"],m["var"],m["ell"])@m["a"]+m["mu"]
 def _s52(X1,X2,var,lx,ly):
     dx=X1[:,None,0]-X2[None,:,0]; dy=X1[:,None,1]-X2[None,:,1]
     r=np.sqrt((dx/lx)**2+(dy/ly)**2+1e-12); s=np.sqrt(5.)*r
-    return var*(1.+s+s**2/3.)*np.exp(-s)
+    return var*(1.+s+(s**2)/3.)*np.exp(-s)
 
 def fit_sc(Xt,yt,noise=1e-5,hp=None,lbl=""):
     if hp is None: hp=dict(var=float(np.var(yt)+1e-12),lx=1.5,ly=1.0)
