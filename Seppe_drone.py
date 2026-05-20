@@ -90,7 +90,7 @@ def pick_informative_drones(X_ensemble, cell_x, cell_y, R, n_drones,
     # sort all cell indices by score, highest first
     sorted_idx = np.argsort(score)[::-1]
 
-    min_dist = 5.0
+    min_dist = 0.0
     selected = []  # list of (x, y) tuples
 
     for idx in sorted_idx:

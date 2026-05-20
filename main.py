@@ -11,7 +11,7 @@ from Seppe_drone import pick_informative_drones
 
 from alive_progress import alive_bar
 
-def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_alpha, truth_path, point_distribution, dims, n_samples, plot=False):
+def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, directory, truth_U_inlet, truth_alpha, truth_path, point_distribution, dims, n_samples, plot=False, write_to=None):
     NOISE_STD = 0.15
     #point_distribution = 'optimized'
     seed = sum([ord(char) for char in 'PEACH_VIBE'])
@@ -48,9 +48,10 @@ def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_a
             drone_xy = np.array(json.load(f)['xy'])
             # print(drone_xy['xy'])
     print('Points sampled!')
+
     # generate synthetic measurements from the truth case
     y_measured, obs_indices, drone_xy_snapped = make_drone_observations(
-        truth_path, drone_xy, noise_std=NOISE_STD, seed=42
+        truth_path, directory, drone_xy, noise_std=NOISE_STD, seed=42
     )
     
     #calculate the mean of all CFDs before
@@ -82,22 +83,6 @@ def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_a
     X_mean_mags = np.sqrt(X_mean_even**2 + X_mean_odd**2)
 
     
-    print("=== Results ===")
-    print(f'POINT DISTRIBUTION: {point_distribution}')
-    print(f"Number of samples: {len(y_measured)/2}")
-    print(f"Size of state matrix: {X_analysis.shape}\n")
-
-    print(f"Truth inlet velocity: {truth_U_inlet:.3f} [m/s]")
-    print(f"Truth AoA: {truth_alpha:.3f} [deg]\n")
-
-    print(f"Initial mean inlet: {U_inlet_lst.mean():.3f} [m/s]")
-    print(f"Initial mean AoA: {alpha_lst.mean():.3f} [deg]\n")
-    
-    print(f"Final mean inlet: {analysis_inlet.mean():.3f} [m/s]")
-    print(f"Final std inlet: {analysis_inlet.std():.3f} [m/s]\n")
-    
-    print(f"Final mean AoA: {analysis_alpha.mean():.3f} [deg]")
-    print(f"Final std AoA: {analysis_alpha.std():.3f} [deg]\n")
 
     # print(dX_analysis)
     # print(mean_corr)
@@ -105,9 +90,28 @@ def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_a
     inlet_improvement = abs(analysis_inlet.mean() - truth_U_inlet) < abs(U_inlet_lst.mean() - truth_U_inlet)
     alpha_improvement = abs(analysis_alpha.mean() - truth_alpha)   < abs(alpha_lst.mean()   - truth_alpha)
     
-    print(f"Inlet improved: {inlet_improvement}")
-    print(f"AoA improved: {alpha_improvement}")
+    terminal_output = f"""
+    === Results ===
+    POINT DISTRIBUTION: {point_distribution}
+    Number of samples: {len(y_measured)/2}
+    Size of state matrix: {X_analysis.shape}
 
+    Truth inlet velocity: {truth_U_inlet:.3f} [m/s]
+    Truth AoA: {truth_alpha:.3f} [deg]
+
+    Initial mean inlet: {U_inlet_lst.mean():.3f} [m/s]
+    Initial mean AoA: {alpha_lst.mean():.3f} [deg]
+    
+    Final mean inlet: {analysis_inlet.mean():.3f} [m/s]
+    Final std inlet: {analysis_inlet.std():.3f} [m/s]
+    
+    Final mean AoA: {analysis_alpha.mean():.3f} [deg]
+    Final std AoA: {analysis_alpha.std():.3f} [deg]
+    
+    Inlet improved: {inlet_improvement}
+    AoA improved: {alpha_improvement}"""
+    print('Complete!')
+    
     xtrue, ytrue, utrue, vtrue = load_one_cfd(truth_path)
     Xtrue_positions = np.vstack([xtrue, ytrue]).T
     Xtrue_mags = np.sqrt(utrue**2 + vtrue**2)
@@ -123,10 +127,14 @@ def main(X_positions, X_ensemble, U_inlet_lst, alpha_lst, truth_U_inlet, truth_a
         fig3 = plot_error_field(X_positions, Xinitial_mean_mags, X_mean_mags, drone_xy)
 
         # plt.show()
-        fig.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}/truth-initial-final_U={truth_U_inlet}_a={truth_alpha}.png')
-        fig2.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}/boxplot_U={truth_U_inlet}_a={truth_alpha}.png')
-        fig3.savefig(f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}/ENKF-change_U={truth_U_inlet}_a={truth_alpha}.png')
+        fig.savefig(f'{write_to}/truth-initial-final_U={truth_U_inlet}_a={truth_alpha}.png')
+        fig2.savefig(f'{write_to}/boxplot_U={truth_U_inlet}_a={truth_alpha}.png')
+        fig3.savefig(f'{write_to}/ENKF-change_U={truth_U_inlet}_a={truth_alpha}.png')
         print('Figures are saved.')
+
+        print(terminal_output)
+        with open(os.path.join('results',f'U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}', f'terminal.txt'), 'w') as f:
+            f.write(terminal_output)
     return analysis_inlet.mean(), analysis_inlet.std(), analysis_alpha.mean(), analysis_alpha.std()
     
 #load cfds
@@ -193,22 +201,25 @@ def sample_points(n, xlim, ylim, center, theta_deg, s, a, h, excl_center, excl_r
         pts.extend(new_pts.tolist())
     return np.array(pts[:n])
 
-def run_single(truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution, n_samples):
+def run_single(write_to, directory, truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution, n_samples):
     inlet_mean, inlet_std, alpha_mean, alpha_std = main(*loaded,
+                                                        directory,
                                                         truth_U_inlet=truth_U_inlet,
                                                         truth_alpha=truth_alpha,
                                                         truth_path = truth_path,
                                                         point_distribution = point_distribution,
                                                         dims = (800, 500),
                                                         n_samples = n_samples,
-                                                        plot=True)
+                                                        plot=True,
+                                                        write_to=write_to)
 
 
-def run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded):
+def run_sensitivity_study(write_to, directory, truth_path, truth_U_inlet, truth_alpha, loaded):
     results = []
     with alive_bar(100) as bar:
         for n in np.arange(1, 101, 1):
             inlet_mean, inlet_std, alpha_mean, alpha_std = main(*loaded,
+                                                                directory,
                                                                 truth_U_inlet=truth_U_inlet,
                                                                 truth_alpha=truth_alpha,
                                                                 truth_path = truth_path,
@@ -223,6 +234,7 @@ def run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded):
     with alive_bar(100) as bar:
         for n in np.arange(1, 101, 1):
             inlet_mean, inlet_std, alpha_mean, alpha_std = main(*loaded,
+                                                                directory,
                                                                 truth_U_inlet=truth_U_inlet,
                                                                 truth_alpha=truth_alpha,
                                                                 truth_path = truth_path,
@@ -237,6 +249,7 @@ def run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded):
     with alive_bar(100) as bar:
         for n in np.arange(1, 101, 1):
             inlet_mean, inlet_std, alpha_mean, alpha_std = main(*loaded,
+                                                                directory,
                                                                 truth_U_inlet=truth_U_inlet,
                                                                 truth_alpha=truth_alpha,
                                                                 truth_path = truth_path,
@@ -248,11 +261,12 @@ def run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded):
     results_lines = np.array(results_lines)
 
     fig, axes = plt.subplots(1,2)
-    fig.suptitle('Sensitivity study: STD of initial conditions wrt. number of drones')
+    fig.suptitle(f'STD of initial conditions wrt. number of drones: U={truth_U_inlet}_a={truth_alpha}')
 
     axes[0].plot(results[:,0], results[:, 2], label='randomly within zone')
     axes[0].plot(results_optimized[:,0], results_optimized[:, 2], label='optimized selection')
     axes[0].plot(results_lines[:,0], results_lines[:, 2], label='line selection')
+    axes[0].set_yscale('log')
     axes[0].set_xlabel('Number of drones')
     axes[0].set_ylabel('Mean Initial Velocity STD')
     axes[0].set_title('Inlet velocity')
@@ -260,34 +274,38 @@ def run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded):
     axes[1].plot(results[:,0], results[:, 4], label='randomly within zone')
     axes[1].plot(results_optimized[:,0], results_optimized[:, 4], label='optimized selection')
     axes[1].plot(results_lines[:,0], results_lines[:, 4], label='line selection')
+    axes[1].set_yscale('log')
     axes[1].set_xlabel('Number of drones')
     axes[1].set_ylabel('AOA STD')
     axes[1].set_title('Alpha')
 
     plt.legend()
-    # plt.show()
+    plt.show()
 
-    np.savetxt(os.path.join('results',f'sensitivity_U={truth_U_inlet}_a={truth_alpha}', f'std-to-ndrones-sensitivity_U={truth_U_inlet}_a={truth_alpha}.csv'), results, header='n_drones, inlet-mean, inlet-std, alpha-mean, alpha-std')
-    fig.savefig(os.path.join('results', f'sensitivity_U={truth_U_inlet}_a={truth_alpha}', f'std-to-ndrones-sensitivity_U={truth_U_inlet}_a={truth_alpha}.png'))
+    np.savetxt(os.path.join(write_to, f'std-to-ndrones-sensitivity_U={truth_U_inlet}_a={truth_alpha}.csv'), results, header='n_drones, inlet-mean, inlet-std, alpha-mean, alpha-std')
+    fig.savefig(os.path.join(write_to, f'std-to-ndrones-sensitivity_U={truth_U_inlet}_a={truth_alpha}.png'))
 
 if __name__ == "__main__":
     case_folder = 'sim'
     directory = os.path.join(case_folder, 'CORRECTED_simulation_outputs')
     #truths 
-    truth_path = os.path.join(case_folder, 'solution_data_truth14.5.csv')
+    truth_path = os.path.join(case_folder, 'solution_data_truth14.5bettermesh.csv')
     truth_U_inlet, truth_alpha = 14.5, -14.5
     point_distribution = 'lines'
     n_samples = 10
     loaded = load_main(directory)
-    try: 
-        os.mkdir(f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}')
-    except: 
-        pass
-    run_single(truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution=point_distribution, n_samples=n_samples)
-    
+
+    # write_to = f'results/U={truth_U_inlet}_a={truth_alpha}_{point_distribution.upper()}'
     # try: 
-    #     os.mkdir(f'results/sensitivity_U={truth_U_inlet}_a={truth_alpha}')
+    #     os.mkdir(write_to)
     # except: 
     #     pass
-    # run_sensitivity_study(truth_path, truth_U_inlet, truth_alpha, loaded)
+    # run_single(write_to, directory, truth_path, truth_U_inlet, truth_alpha, loaded, point_distribution=point_distribution, n_samples=n_samples)
+    
+    write_to = f'results/sensitivity_U={truth_U_inlet}_a={truth_alpha}_bettermesh'
+    try: 
+        os.mkdir(write_to)
+    except: 
+        pass
+    run_sensitivity_study(write_to, directory, truth_path, truth_U_inlet, truth_alpha, loaded)
 

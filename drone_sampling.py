@@ -2,8 +2,9 @@ import numpy as np
 from scipy.spatial import KDTree
 import matplotlib.pyplot as plt
 from load import load_one_cfd
+import os
 
-def make_drone_observations(truth_path, drone_xy, noise_std, seed=42):
+def make_drone_observations(truth_path, crude_path, drone_xy, noise_std, seed=42):
     """
     Sample a truth CFD at hand-picked drone locations, add noise,
     and return the values + their indices into X_ensemble.
@@ -20,16 +21,25 @@ def make_drone_observations(truth_path, drone_xy, noise_std, seed=42):
     # KDTree lookup 
     tree = KDTree(obs[:, :2])
     _, cell_indices = tree.query(drone_xy)
+    measurements = obs[cell_indices, :]
     
+    sample_file = os.path.join(crude_path, 'vel_13_aoa_-13', 'solution_data.csv') #TODO this has to become dynamic
+    x, y, _, _ = load_one_cfd(sample_file)
+    coords = np.column_stack([x, y])
+    tree2 = KDTree(coords)
+    _, actual_cell_indices = tree2.query(measurements[:, :2])
+
+    print(actual_cell_indices.shape)
+    y_predict = np.column_stack([coords[actual_cell_indices, :],  measurements[:, 2:]])
+
     # y_predict in the original style: snapped (x, y, u, v) at each drone
-    y_predict = obs[cell_indices, :]
     
     # convert into the ETKF-compatible format
     n_drones = len(drone_xy)
     y_measured = np.zeros(2 * n_drones)
     obs_indices = np.zeros(2 * n_drones, dtype=int)
     
-    for i, cell_idx in enumerate(cell_indices):
+    for i, cell_idx in enumerate(actual_cell_indices):
         # u-measurement → row 2*cell_idx of X_ensemble
         y_measured[2*i]     = y_predict[i, 2] + rng.normal(0, noise_std)
         obs_indices[2*i]    = 2 * cell_idx
