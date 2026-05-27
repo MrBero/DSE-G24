@@ -25,7 +25,7 @@ rnd.seed(seed)
 
 # Random sampling function
 # Inputs: 
-train_count = 100
+train_count = 4
 x_train = np.sort(rnd.uniform(-10, 10, train_count))
 x_train = np.array(x_train)
 y_train = 2 * np.sin(x_train) + rnd.normal(0, 0.5, train_count)
@@ -47,7 +47,6 @@ K_xstar = matern_five_two_1D(A_star, B_star, ell, var)
 # Covariance between test points themeselves
 A_test, B_test = np.meshgrid(x_test, x_test, indexing='ij')
 K_xstar_xstar = matern_five_two_1D(A_test, B_test, ell, var)
-
 
 # GPR Prediction
 mu_test = K_xstar @ K_1D_inv @ y_train
