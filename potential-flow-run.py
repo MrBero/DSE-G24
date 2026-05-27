@@ -29,7 +29,6 @@ def uniform_flow(x,y,z,U,V,W):
 def point_vortex(x,y,z,x0,y0,z0,gamma):
     return -gamma/(4*np.pi * np.sqrt((x-x0)**2 + (y-y0)**2 + (z-z0)**2))
 
-ax = plt.figure().add_subplot(projection='3d')
 
 mesh = trimesh.load_mesh('inputs/sphere.stl')
 mesh_centers = mesh.triangles_center
@@ -71,6 +70,7 @@ u_q = u_f[inside_bool]; v_q = v_f[inside_bool]; w_q = w_f[inside_bool]
 
 # print(vel_stream.shape)
 
+ax = plt.figure().add_subplot(projection='3d')
 ax.scatter3D(mesh_centers[:,0], mesh_centers[:,1], mesh_centers[:,2], c='black', alpha=0.5)
 ax.quiver(x_q,y_q,z_q,
           u_q,v_q,w_q,
