@@ -12,16 +12,16 @@ import os
 seed = 7
 rnd.seed(seed)
 
-# GROUND TRUTH SUBSAMPLING FUNCTION 
-# Inputs:
-# field_path -- path to the field data (csv) of the underlying CFD truth
-# wall_path -- path to the wall coordinates (csv)
-# samples (CSV file path OR np array) -- (N, 3) array of points within the domain to be sampled.
-# method (string) -- "random", "CSV", or "array".
-# epsilon -- length (in meters) of margin of sampling from building walls
-# num_samples -- number of random points to generate if method is "random"
 
 def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_samples=2000):
+    ''' GROUND TRUTH SUBSAMPLING FUNCTION
+    \nInputs
+    \nfield_path -- path to the field data (csv) of the underlying CFD truth
+    \nwall_path -- path to the wall coordinates (csv)
+    \nsamples (CSV file path OR np array) -- (N, 3) array of points within the domain to be sampled.
+    \nmethod (string) -- "random", "CSV", or "array".
+    \nepsilon -- length (in meters) of margin of sampling from building walls
+    \nnum_samples -- number of random points to generate if method is "random"'''
 
     # Load field ground truth
     cfd_df = pd.read_csv(field_path)
@@ -121,4 +121,3 @@ def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_
     )
         
     return results_df
-
