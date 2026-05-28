@@ -122,4 +122,4 @@ def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_
         columns=columns
     )
         
-    return results_df, bounds
+    return results_df, bounds, wall_df

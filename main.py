@@ -5,12 +5,14 @@ import time
 
 #ground truth values or real world measurements; 'training' for GPR
 training_point_n = 100
-ground_truth, bounds = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
+ground_truth, bounds, wall_df = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
 training_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy() #leave unflattened for functionality
-training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().flatten() #flatten to match dims in equation 1.7
+training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().reshape(-1,1) #flatten to match dims in equation 1.7
+# print(training_vels.shape)
+
 
 #test points to points at which we seek GPR to evaluate the field
-res = 3
+res = 10
 x,y,z = np.meshgrid(np.linspace(bounds[0,0], bounds[0,1], res), 
                         np.linspace(bounds[1,0], bounds[1,1], res), 
                         np.linspace(bounds[2,0], bounds[2,1], res),
@@ -18,7 +20,8 @@ x,y,z = np.meshgrid(np.linspace(bounds[0,0], bounds[0,1], res),
 
 test_points = np.stack([x,y,z], axis=-1).reshape(-1,3)
 test_point_n = test_points.shape[0]
-# print(test_points)
+
+print(f"Total number of training points: {training_point_n}\nTotal number of test points: {test_point_n}")
 
 # def matern_five_two_isotropic(a, b, ell, var):
 #     dist = np.abs(a - b)
@@ -86,21 +89,32 @@ print(K_matrix.shape)
 tick = time.thread_time()
 K_noised_inv = np.linalg.inv(K_matrix)
 tock = time.thread_time()
-print(K_noised_inv)
 print(f'Inversion complete in {tock-tick:.3f}s')
+print(K_noised_inv.shape)
 
 tick = time.thread_time()
 k_star = assemble_dat_shi(test_points, training_coords)
 tock = time.thread_time()
 print(f'K_star assembled in {tock-tick:.3f}s')
-
+print(k_star.shape)
 
 means_training = np.zeros((training_point_n * 3,1))
 means_tests = np.zeros((test_point_n * 3, 1))
+
+print((k_star @ K_noised_inv).shape)
+print((training_vels - means_training).shape)
 
 tick = time.thread_time()
 GPR_posterior = means_tests + k_star @ K_noised_inv @ (training_vels - means_training)
 tock = time.thread_time()
 print(f'GPR Posterior generated in {tock-tick:.3f}s')
-
 print(GPR_posterior.shape)
+
+GPR_posterior_reshaped = GPR_posterior.reshape(-1,3)
+
+ax = plt.figure().add_subplot(projection='3d')
+ax.quiver(test_points[:,0],test_points[:,1],test_points[:,2],
+          GPR_posterior_reshaped[:,0],GPR_posterior_reshaped[:,1],GPR_posterior_reshaped[:,2],
+          length=0.01, normalize=True)
+
+plt.show()
