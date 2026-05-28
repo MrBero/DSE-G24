@@ -1,14 +1,24 @@
 import numpy as np
-import scipy.differentiate as scdiff
 import matplotlib.pyplot as plt
 from sampling import sample
 import time
 
+#ground truth values or real world measurements; 'training' for GPR
 training_point_n = 100
-ground_truth = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
-# ground_coords = ground_truth[]
-ground_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy()
-print(ground_truth.shape)
+ground_truth, bounds = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
+training_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy() #leave unflattened for functionality
+training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().flatten() #flatten to match dims in equation 1.7
+
+#test points to points at which we seek GPR to evaluate the field
+res = 3
+x,y,z = np.meshgrid(np.linspace(bounds[0,0], bounds[0,1], res), 
+                        np.linspace(bounds[1,0], bounds[1,1], res), 
+                        np.linspace(bounds[2,0], bounds[2,1], res),
+                        indexing='ij')
+
+test_points = np.stack([x,y,z], axis=-1).reshape(-1,3)
+test_point_n = test_points.shape[0]
+# print(test_points)
 
 # def matern_five_two_isotropic(a, b, ell, var):
 #     dist = np.abs(a - b)
@@ -49,22 +59,48 @@ def Hemholtz_K0(V1, V2):
                     [H[1,0], -H[2,2]-H[0,0], -H[1,2]],
                     [H[2,0], H[0,1], -H[0,0]-H[1,1]]])
 
-K_matrix = np.zeros((training_point_n*3, training_point_n*3))
 
-sigma_noise = 0.05
-variance = 1
-for i in range(training_point_n):
-    for j in range(training_point_n):
-            if i==j:
-                K_matrix[3*i:3*i+3, 3*j:3*j+3] += sigma_noise**2 #terms on the diagonals
-            p_1 = ground_coords[i,:]
-            p_2 = ground_coords[j,:]
-            K_matrix[3*i:3*i+3, 3*j:3*j+3] += Hemholtz_K0(p_1, p_2)
+def assemble_dat_shi(points_1, points_2, noise=True): #assemble a matrix of covariances (3x3 matrix per covariance calc) given 2 sets of points
+    n_1 = points_1.shape[0]
+    n_2 = points_2.shape[0]
+    print(n_1, n_2)
+    result_matrix = np.zeros((n_1*3, n_2*3))
+    sigma_noise = 0.05
+    for i in range(n_1):
+        for j in range(n_2):
+                if i==j and noise:
+                    result_matrix[3*i:3*i+3, 3*j:3*j+3] += sigma_noise**2 #terms on the diagonals
+                p_1 = points_1[i,:]
+                p_2 = points_2[j,:]
+                result_matrix[3*i:3*i+3, 3*j:3*j+3] += Hemholtz_K0(p_1, p_2)
+    print(result_matrix.shape)
+    return result_matrix
+
+tick = time.thread_time()
+K_matrix = assemble_dat_shi(training_coords, training_coords)
+tock = time.thread_time()
+print(f'K_matrix assembled in {tock-tick:.3f}s')
 print(K_matrix.shape)
-#invert the noised K matrix
-# tick = time.thread_time()
-# K_noised_inv = np.linalg.inv(K_matrix)
-# tock = time.thread_time()
-# print(K_noised_inv)
-# print(f'Inversion complete in {tock-tick:.3f}s')
 
+#invert the noised K matrix
+tick = time.thread_time()
+K_noised_inv = np.linalg.inv(K_matrix)
+tock = time.thread_time()
+print(K_noised_inv)
+print(f'Inversion complete in {tock-tick:.3f}s')
+
+tick = time.thread_time()
+k_star = assemble_dat_shi(test_points, training_coords)
+tock = time.thread_time()
+print(f'K_star assembled in {tock-tick:.3f}s')
+
+
+means_training = np.zeros((training_point_n * 3,1))
+means_tests = np.zeros((test_point_n * 3, 1))
+
+tick = time.thread_time()
+GPR_posterior = means_tests + k_star @ K_noised_inv @ (training_vels - means_training)
+tock = time.thread_time()
+print(f'GPR Posterior generated in {tock-tick:.3f}s')
+
+print(GPR_posterior.shape)

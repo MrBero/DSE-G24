@@ -34,6 +34,8 @@ def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_
     y_min, y_max = source_coords[:, 1].min(), source_coords[:, 1].max()
     z_min, z_max = source_coords[:, 2].min(), source_coords[:, 2].max()
 
+    bounds = np.array([[x_min, x_max],[y_min, y_max],[z_min, z_max]])
+
     # Load wall data and construct tree for optimized distance checking
     wall_df = pd.read_csv(wall_path)
     wall_df.columns = wall_df.columns.str.strip()
@@ -120,4 +122,4 @@ def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_
         columns=columns
     )
         
-    return results_df
+    return results_df, bounds
