@@ -2,57 +2,21 @@ import numpy as np
 import os
 os.environ['JAX_PLATFORMS'] = 'cpu' #if jax CUDA is installed, then we force cpu in this case. comment if gpu compute is preferred
 
-
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import cho_factor, cho_solve
 import jax.scipy.optimize
+jax.config.update("jax_enable_x64", True)
+import scipy.interpolate
+
+
 import matplotlib.pyplot as plt
-from sampling import sample
 import trimesh
 import time
 
-jax.config.update("jax_enable_x64", True)
+from potential_flow_run import PotentialFlowSolver
+from sampling import sample
 
-#ground truth values or real world measurements; 'training' for GPR
-training_point_n = 100
-ground_truth, bounds, wall_df = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
-training_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy() #leave unflattened for functionality
-training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().reshape(-1,1) #flatten to match dims in equation 1.7
-# print(training_vels.shape)
-
-
-#test points to points at which we seek GPR to evaluate the field
-res = 60
-x,y,z = np.meshgrid(np.linspace(bounds[0,0], bounds[0,1], res), 
-                        np.linspace(bounds[1,0], bounds[1,1], res), 
-                        np.linspace(bounds[2,0], bounds[2,1], res),
-                        indexing='ij')
-
-test_points = np.stack([x,y,z], axis=-1).reshape(-1,3)
-test_point_n = test_points.shape[0]
-
-print(f"Total number of training points: {training_point_n}\nTotal number of test points: {test_point_n}")
-
-# def matern_five_two_isotropic(a, b, ell, var):
-#     dist = np.abs(a - b)
-#     term_1 = 1 + (np.sqrt(5) * dist) / ell + (5 * (dist**2)) / (3 * (ell**2))
-#     term_2 = (-(np.sqrt(5) * dist)) / ell
-#     term_3 = np.exp(term_2)
-#     val = var * term_1 * term_3
-#     return val
-
-# def matern_five_two_anisotropic_2D(x_1, x_2, y_1, y_2, ell_1, ell_2, var):
-#     r_ARD = np.sqrt(((x_1 - y_1)**2 / ell_1**2) + ((x_2 - y_2)**2 / ell_2**2))
-#     term_1 = 1 + np.sqrt(5)*r_ARD + (5/3)*(r_ARD**2)
-#     term_2 = np.exp(-np.sqrt(5)*r_ARD)
-#     val = var * term_1 * term_2
-#     return val
-
-# def matern52_np(v1, v2, ell_1=1.0, ell_2=2.0, ell_3=1.5, var=1.0):
-#     diff = v2 - v1
-#     r = np.sqrt((diff[0]/ell_1)**2 + (diff[1]/ell_2)**2 + (diff[2]/ell_3)**2)
-#     return var * (1 + np.sqrt(5)*r + (5/3)*r**2) * np.exp(-np.sqrt(5)*r)
 
 def matern52_np(v1, v2, ell, var):
     diff = v2 - v1
@@ -77,32 +41,6 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise=True): #assemble a matr
     if noise and n_1 == n_2:
         result_matrix = result_matrix + sigma_noise**2 * jnp.eye(n_1*3) #terms on the diagonals
     return result_matrix
-
-
-def gammas_VPM(centroids, normals, V_inf): #vortex panel method
-    n = centroids.shape[0]
-    A = np.zeros((n,n))
-    for i in range(n):
-        for j in range(n):
-            if i==j:
-                A[i,j] = 0.5
-                continue
-            r_vect = centroids[i] - centroids[j]
-            r = np.linalg.norm(r_vect)
-            A[i,j] = np.dot(r_vect / (4 * np.pi * r**3), normals[i])
-    RHS = -np.dot(normals, V_inf)
-    gammas = np.linalg.solve(A, RHS)
-    return gammas
-
-
-def prior_mean_velocity(P, centers, gammas, V_inf):
-    P = np.atleast_2d(P)
-    vel = np.tile(np.asarray(V_inf, float), (P.shape[0], 1))
-    diff = P[:, None, :] - centers[None, :, :]
-    R = np.maximum(np.linalg.norm(diff, axis=2), 1e-12)
-    coeff = gammas[None, :] / (4*np.pi * R**3)
-    vel += np.einsum('qc,qcd->qd', coeff, diff)
-    return vel
 
 
 def fit_hyperparams(train_coords, train_vels, n_restarts=4, jitter=1e-6, seed=0):
@@ -140,12 +78,43 @@ def fit_hyperparams(train_coords, train_vels, n_restarts=4, jitter=1e-6, seed=0)
     f, t, ok = best
     return {'ell': t[0:3], 'var': float(t[3]), 'noise': float(t[4]), 'nll': f, 'success': ok}
 
+#ground truth values or real world measurements; 'training' for GPR
+training_point_n = 100
+#below, Field.csv comes from CFD. wall.csv should be replaced with points taken from the loaded stl file though!!! The starting point should become some stl.
+ground_truth, bounds, wall_df = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
+training_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy() #leave unflattened for functionality
+training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().reshape(-1,1) #flatten to match dims in equation 1.7
+# print(training_vels.shape)
+
+
+#test points to points at which we seek GPR to evaluate the field
+res = 20
+x,y,z = np.meshgrid(np.linspace(bounds[0,0], bounds[0,1], res), 
+                        np.linspace(bounds[1,0], bounds[1,1], res), 
+                        np.linspace(bounds[2,0], bounds[2,1], res),
+                        indexing='ij')
+
+test_points = np.stack([x,y,z], axis=-1).reshape(-1,3)
+test_point_n = test_points.shape[0]
+print(f"Total number of training points: {training_point_n}\nTotal number of test points: {test_point_n}")
+
 tick = time.thread_time()
-mesh = trimesh.load_mesh('inputs/sphere.stl')
-V_inf = np.array([10, 0, 0])
-gammas = gammas_VPM(mesh.triangles_center, mesh.face_normals, V_inf=V_inf)
-means_training = prior_mean_velocity(training_coords, mesh.triangles_center, gammas, V_inf).reshape(-1, 1)
-means_tests = prior_mean_velocity(test_points, mesh.triangles_center, gammas, V_inf).reshape(-1, 1)
+stl_filepath = 'inputs/sphere.stl' #this has to be updated to cylinder.stl of correct dimensions and position!!!
+V_inf = np.array([10, 0, 0]) #this has to be updated to the inlet conditions of the cfd!!!
+potential_flow_solver = PotentialFlowSolver(V_inf, stl_filepath)
+
+print(test_points.shape)
+potential_flow_field = potential_flow_solver.generate_flow_field(x, y, z)  # keep as (N, 3), drop the .reshape(-1,1)
+means_tests = potential_flow_field  # already (N, 3) matching test_points
+
+means_training = scipy.interpolate.griddata(
+    points=test_points,           # (N, 3)
+    values=potential_flow_field,  # (N, 3) — must match first dim of points
+    xi=training_coords,           # (M, 3)
+    method='linear'
+)  # returns (M, 3)
+
+means_training = 0
 tock = time.thread_time()
 print(f'Prior means potential field calculated in: {tock-tick:.3f}s')
 
@@ -179,7 +148,8 @@ print((k_star @ K_noised_inv).shape)
 print((training_vels - means_training).shape)
 
 tick = time.thread_time()
-GPR_posterior = means_tests + k_star @ K_noised_inv @ (training_vels - means_training)
+residuals = (training_vels.reshape(-1, 3) - means_training).reshape(-1, 1)
+GPR_posterior = means_tests.reshape(-1, 1) + k_star @ K_noised_inv @ residuals
 tock = time.thread_time()
 print(f'GPR Posterior generated in {tock-tick:.3f}s')
 print(GPR_posterior.shape)
