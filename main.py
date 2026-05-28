@@ -1,4 +1,8 @@
 import numpy as np
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu' #if jax CUDA is installed, then we force cpu in this case. comment if gpu compute is preferred
+
+
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import cho_factor, cho_solve
@@ -136,15 +140,20 @@ def fit_hyperparams(train_coords, train_vels, n_restarts=4, jitter=1e-6, seed=0)
     f, t, ok = best
     return {'ell': t[0:3], 'var': float(t[3]), 'noise': float(t[4]), 'nll': f, 'success': ok}
 
+tick = time.thread_time()
 mesh = trimesh.load_mesh('inputs/sphere.stl')
 V_inf = np.array([10, 0, 0])
 gammas = gammas_VPM(mesh.triangles_center, mesh.face_normals, V_inf=V_inf)
-
 means_training = prior_mean_velocity(training_coords, mesh.triangles_center, gammas, V_inf).reshape(-1, 1)
 means_tests = prior_mean_velocity(test_points, mesh.triangles_center, gammas, V_inf).reshape(-1, 1)
+tock = time.thread_time()
+print(f'Prior means potential field calculated in: {tock-tick:.3f}s')
 
+tick = time.thread_time()
 fit = fit_hyperparams(training_coords, training_vels - means_training)
 ell, var = jnp.asarray(fit['ell']), fit['var']
+tock = time.thread_time()
+print(f'Hyperparameter fitting complete in {tock-tick:.3f}s')
 print(fit)
 
 tick = time.thread_time()
