@@ -60,7 +60,7 @@ def Hemholtz_K0(V1, V2):
     H = numerical_hessian(lambda u: matern52_np(u, V2), V1)
     return np.block([[-H[1,1]-H[2,2], H[0,1], H[0,2]],
                     [H[1,0], -H[2,2]-H[0,0], -H[1,2]],
-                    [H[2,0], H[0,1], -H[0,0]-H[1,1]]])
+                    [H[2,0], H[2,1], -H[0,0]-H[1,1]]])
 
 
 def assemble_dat_shi(points_1, points_2, noise=True): #assemble a matrix of covariances (3x3 matrix per covariance calc) given 2 sets of points
@@ -72,7 +72,7 @@ def assemble_dat_shi(points_1, points_2, noise=True): #assemble a matrix of cova
     for i in range(n_1):
         for j in range(n_2):
                 if i==j and noise:
-                    result_matrix[3*i:3*i+3, 3*j:3*j+3] += sigma_noise**2 #terms on the diagonals
+                    result_matrix[3*i:3*i+3, 3*j:3*j+3] += sigma_noise**2 * np.eye(3) #terms on the diagonals
                 p_1 = points_1[i,:]
                 p_2 = points_2[j,:]
                 result_matrix[3*i:3*i+3, 3*j:3*j+3] += Hemholtz_K0(p_1, p_2)
@@ -113,6 +113,7 @@ print(GPR_posterior.shape)
 GPR_posterior_reshaped = GPR_posterior.reshape(-1,3)
 
 ax = plt.figure().add_subplot(projection='3d')
+ax.scatter3D(wall_df[['x-coordinate']].values, wall_df[['y-coordinate']].values, wall_df[['z-coordinate']].values, c='black')
 ax.quiver(test_points[:,0],test_points[:,1],test_points[:,2],
           GPR_posterior_reshaped[:,0],GPR_posterior_reshaped[:,1],GPR_posterior_reshaped[:,2],
           length=0.01, normalize=True)
