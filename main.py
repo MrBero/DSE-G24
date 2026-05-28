@@ -1,4 +1,6 @@
 import numpy as np
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from sampling import sample
 import time
@@ -38,10 +40,15 @@ print(f"Total number of training points: {training_point_n}\nTotal number of tes
 #     val = var * term_1 * term_2
 #     return val
 
+# def matern52_np(v1, v2, ell_1=1.0, ell_2=2.0, ell_3=1.5, var=1.0):
+#     diff = v2 - v1
+#     r = np.sqrt((diff[0]/ell_1)**2 + (diff[1]/ell_2)**2 + (diff[2]/ell_3)**2)
+#     return var * (1 + np.sqrt(5)*r + (5/3)*r**2) * np.exp(-np.sqrt(5)*r)
+
 def matern52_np(v1, v2, ell_1=1.0, ell_2=2.0, ell_3=1.5, var=1.0):
     diff = v2 - v1
-    r = np.sqrt((diff[0]/ell_1)**2 + (diff[1]/ell_2)**2 + (diff[2]/ell_3)**2)
-    return var * (1 + np.sqrt(5)*r + (5/3)*r**2) * np.exp(-np.sqrt(5)*r)
+    r = jnp.sqrt((diff[0]/ell_1)**2 + (diff[1]/ell_2)**2 + (diff[2]/ell_3)**2 + 1e-8)
+    return var * (1 + jnp.sqrt(5)*r + (5/3)*r**2) * jnp.exp(-jnp.sqrt(5)*r)
 
 def numerical_hessian(f, x, eps=1e-4):
     """Central-difference Hessian of scalar f: R^n -> R"""
@@ -56,9 +63,11 @@ def numerical_hessian(f, x, eps=1e-4):
             H[j, i] = H[i, j]
     return H
 
+@jax.jit
 def Hemholtz_K0(V1, V2):
-    H = numerical_hessian(lambda u: matern52_np(u, V2), V1)
-    return np.block([[-H[1,1]-H[2,2], H[0,1], H[0,2]],
+    # H = jax.hessian(lambda u: matern52_np(u, V2))
+    H = jax.hessian(matern52_np)(V1,V2)
+    return jnp.array([[-H[1,1]-H[2,2], H[0,1], H[0,2]],
                     [H[1,0], -H[2,2]-H[0,0], -H[1,2]],
                     [H[2,0], H[2,1], -H[0,0]-H[1,1]]])
 
