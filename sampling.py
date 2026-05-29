@@ -2,8 +2,6 @@ import numpy as np
 import numpy.random as rnd
 import matplotlib.pyplot as plt
 import scipy as sp
-import scipy.spatial
-import scipy.interpolate
 import jax as jax
 import pandas as pd
 import os
@@ -11,7 +9,6 @@ import os
 # setup
 seed = 7
 rnd.seed(seed)
-
 
 def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_samples=2000):
     ''' GROUND TRUTH SUBSAMPLING FUNCTION

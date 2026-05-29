@@ -1,7 +1,8 @@
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 os.environ['JAX_PLATFORMS'] = 'cpu' #if jax CUDA is installed, then we force cpu in this case. comment if gpu compute is preferred
-
+import time
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import cho_factor, cho_solve
@@ -9,14 +10,8 @@ import jax.scipy.optimize
 jax.config.update("jax_enable_x64", True)
 import scipy.interpolate
 
-
-import matplotlib.pyplot as plt
-import trimesh
-import time
-
 from potential_flow_run import PotentialFlowSolver
 from sampling import sample
-
 
 def matern52_np(v1, v2, ell, var):
     diff = v2 - v1
@@ -31,7 +26,6 @@ def Hemholtz_K0(V1, V2, ell, var):
                     [H[1,0], -H[2,2]-H[0,0], H[1,2]],
                     [H[2,0], H[2,1], -H[0,0]-H[1,1]]])
 
-
 def assemble_dat_shi(points_1, points_2, ell, var, noise=True): #assemble a matrix of covariances (3x3 matrix per covariance calc) given 2 sets of points
     n_1 = points_1.shape[0]
     n_2 = points_2.shape[0]
@@ -41,7 +35,6 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise=True): #assemble a matr
     if noise and n_1 == n_2:
         result_matrix = result_matrix + sigma_noise**2 * jnp.eye(n_1*3) #terms on the diagonals
     return result_matrix
-
 
 def fit_hyperparams(train_coords, train_vels, n_restarts=4, jitter=1e-6, seed=0):
     X = jnp.asarray(train_coords)
@@ -78,14 +71,13 @@ def fit_hyperparams(train_coords, train_vels, n_restarts=4, jitter=1e-6, seed=0)
     f, t, ok = best
     return {'ell': t[0:3], 'var': float(t[3]), 'noise': float(t[4]), 'nll': f, 'success': ok}
 
+stl_filepath = 'inputs/sphere.stl' #TODO this has to be updated to cylinder.stl of correct dimensions and position!!!
 #ground truth values or real world measurements; 'training' for GPR
 training_point_n = 100
-#below, Field.csv comes from CFD. wall.csv should be replaced with points taken from the loaded stl file though!!! The starting point should become some stl.
-ground_truth, bounds, wall_df = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
+#TODO below, Field.csv comes from CFD. wall.csv should be replaced with points taken from the loaded stl file though!!! The starting point should become some stl.
+ground_truth, bounds = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
 training_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy() #leave unflattened for functionality
 training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().reshape(-1,1) #flatten to match dims in equation 1.7
-# print(training_vels.shape)
-
 
 #test points to points at which we seek GPR to evaluate the field
 res = 20
@@ -99,8 +91,7 @@ test_point_n = test_points.shape[0]
 print(f"Total number of training points: {training_point_n}\nTotal number of test points: {test_point_n}")
 
 tick = time.thread_time()
-stl_filepath = 'inputs/sphere.stl' #this has to be updated to cylinder.stl of correct dimensions and position!!!
-V_inf = np.array([10, 0, 0]) #this has to be updated to the inlet conditions of the cfd!!!
+V_inf = np.array([10, 0, 0]) #TODO this has to be updated to the inlet conditions of the cfd!!!
 potential_flow_solver = PotentialFlowSolver(V_inf, stl_filepath)
 
 print(test_points.shape)
@@ -173,3 +164,6 @@ plt.quiver(Xs, Ys, us, vs, color='white')
 plt.gca().set_aspect('equal')
 plt.title(f'xy slice at z={np.linspace(bounds[2,0],bounds[2,1],res)[k]:.2f}')
 plt.show()
+
+#TODO add in a GPR for the pressure field
+#TODO momentum integral code to calculate forces on the building
