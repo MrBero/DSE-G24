@@ -75,7 +75,7 @@ stl_filepath = 'inputs/sphere.stl' #TODO this has to be updated to cylinder.stl 
 #ground truth values or real world measurements; 'training' for GPR
 training_point_n = 100
 #TODO below, Field.csv comes from CFD. wall.csv should be replaced with points taken from the loaded stl file though!!! The starting point should become some stl.
-ground_truth, bounds = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
+ground_truth, bounds, _ = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
 training_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy() #leave unflattened for functionality
 training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().reshape(-1,1) #flatten to match dims in equation 1.7
 
