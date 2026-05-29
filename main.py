@@ -9,8 +9,9 @@ from jax.scipy.linalg import cho_factor, cho_solve
 import jax.scipy.optimize
 jax.config.update("jax_enable_x64", True)
 import scipy.interpolate
+import trimesh
 
-from potential_flow_run import PotentialFlowSolver
+from potential_flow_fix import PotentialFlowSolver
 from sampling import sample
 
 def matern52_np(v1, v2, ell, var):
@@ -26,6 +27,7 @@ def Hemholtz_K0(V1, V2, ell, var):
                     [H[1,0], -H[2,2]-H[0,0], H[1,2]],
                     [H[2,0], H[2,1], -H[0,0]-H[1,1]]])
 
+# @jax.jit
 def assemble_dat_shi(points_1, points_2, ell, var, noise=True): #assemble a matrix of covariances (3x3 matrix per covariance calc) given 2 sets of points
     n_1 = points_1.shape[0]
     n_2 = points_2.shape[0]
@@ -72,15 +74,17 @@ def fit_hyperparams(train_coords, train_vels, n_restarts=4, jitter=1e-6, seed=0)
     return {'ell': t[0:3], 'var': float(t[3]), 'noise': float(t[4]), 'nll': f, 'success': ok}
 
 stl_filepath = 'inputs/sphere.stl' #TODO this has to be updated to cylinder.stl of correct dimensions and position!!!
+stl_mesh = trimesh.load_mesh(stl_filepath) #cylinder: 2.75cm height, 6mm diameter centered at 3.2cm at the x, 1.2cm at the y
 #ground truth values or real world measurements; 'training' for GPR
-training_point_n = 100
-#TODO below, Field.csv comes from CFD. wall.csv should be replaced with points taken from the loaded stl file though!!! The starting point should become some stl.
-ground_truth, bounds, _ = sample('inputs/Field.csv', 'inputs/wall.csv', method='random', num_samples=training_point_n)
+training_point_n = 10 #number of training points (drones)
+res = 5 #test points resolution
+
+
+ground_truth, bounds = sample('inputs/Field.csv', stl_mesh, method='random', num_samples=training_point_n)
 training_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy() #leave unflattened for functionality
 training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().reshape(-1,1) #flatten to match dims in equation 1.7
 
 #test points to points at which we seek GPR to evaluate the field
-res = 20
 x,y,z = np.meshgrid(np.linspace(bounds[0,0], bounds[0,1], res), 
                         np.linspace(bounds[1,0], bounds[1,1], res), 
                         np.linspace(bounds[2,0], bounds[2,1], res),
@@ -92,7 +96,7 @@ print(f"Total number of training points: {training_point_n}\nTotal number of tes
 
 tick = time.thread_time()
 V_inf = np.array([10, 0, 0]) #TODO this has to be updated to the inlet conditions of the cfd!!!
-potential_flow_solver = PotentialFlowSolver(V_inf, stl_filepath)
+potential_flow_solver = PotentialFlowSolver(V_inf, stl_mesh, n_vortices_per_tri=3)
 
 print(test_points.shape)
 potential_flow_field = potential_flow_solver.generate_flow_field(x, y, z)  # keep as (N, 3), drop the .reshape(-1,1)
@@ -103,9 +107,8 @@ means_training = scipy.interpolate.griddata(
     values=potential_flow_field,  # (N, 3) — must match first dim of points
     xi=training_coords,           # (M, 3)
     method='linear'
-)  # returns (M, 3)
+).reshape(-1,1)
 
-means_training = 0
 tock = time.thread_time()
 print(f'Prior means potential field calculated in: {tock-tick:.3f}s')
 
@@ -139,7 +142,7 @@ print((k_star @ K_noised_inv).shape)
 print((training_vels - means_training).shape)
 
 tick = time.thread_time()
-residuals = (training_vels.reshape(-1, 3) - means_training).reshape(-1, 1)
+residuals = (training_vels - means_training).reshape(-1, 1)
 GPR_posterior = means_tests.reshape(-1, 1) + k_star @ K_noised_inv @ residuals
 tock = time.thread_time()
 print(f'GPR Posterior generated in {tock-tick:.3f}s')
@@ -148,21 +151,24 @@ print(GPR_posterior.shape)
 GPR_posterior_reshaped = np.array(GPR_posterior).reshape(-1,3)
 
 
-plt.show()
+# ax = plt.figure().add_subplot(projection='3d')
+# ax.quiver(*test_points.T, *GPR_posterior_reshaped.T, length=0.005)
+# plt.show()
 
-#optional slice visualization
 U = GPR_posterior_reshaped.reshape(res, res, res, 3)
 P = test_points.reshape(res, res, res, 3)
 k = res // 2
 Xs, Ys = P[:, :, k, 0], P[:, :, k, 1]
 us, vs, ws = U[:, :, k, 0], U[:, :, k, 1], U[:, :, k, 2]
 mag = np.sqrt(us**2 + vs**2 + ws**2)
-plt.figure(figsize=(7,6))
-pc = plt.contourf(Xs, Ys, mag, levels=30, cmap='viridis')
-plt.colorbar(pc, label='|velocity|')
-plt.quiver(Xs, Ys, us, vs, color='white')
-plt.gca().set_aspect('equal')
-plt.title(f'xy slice at z={np.linspace(bounds[2,0],bounds[2,1],res)[k]:.2f}')
+
+fig, ax = plt.subplots(figsize=(7, 6))
+pc = ax.contourf(Xs, Ys, mag, levels=30, cmap='viridis')
+fig.colorbar(pc, ax=ax, label='|velocity|')
+ax.scatter(*potential_flow_solver.mesh.vertices.T, c='black')
+ax.quiver(Xs, Ys, us, vs, color='white')
+ax.set_aspect('equal')
+ax.set_title(f'xy slice at z={np.linspace(bounds[2,0],bounds[2,1],res)[k]:.2f}')
 plt.show()
 
 #TODO add in a GPR for the pressure field

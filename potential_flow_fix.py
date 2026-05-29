@@ -1,11 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import jax.numpy as jnp
 import trimesh
 
+
 class PotentialFlowSolver():
-    def __init__(self, V_inf, stl_filepath, n_vortices_per_tri=4):
-        self.mesh = trimesh.load_mesh(stl_filepath)
+    def __init__(self, V_inf, stl_mesh, n_vortices_per_tri=4):
+        self.mesh = stl_mesh
         self.mesh_centers = self.mesh.triangles_center
         self.mesh_normals = self.mesh.face_normals
         self.mesh_triangles = self.mesh.triangles  # (N_tri, 3, 3)
@@ -25,14 +25,6 @@ class PotentialFlowSolver():
         )
 
     def _generate_vortex_sheet_points(self):
-        """
-        Distribute n vortex points inside each triangle using
-        stratified barycentric sampling, then convert to 3D coords.
-        Returns:
-            vortex_points  : (N_tri * n, 3)
-            vortex_normals : (N_tri * n, 3)  — same normal for all points in a tri
-            tri_indices    : (N_tri * n,)    — which triangle each vortex belongs to
-        """
         triangles = self.mesh_triangles      # (N_tri, 3, 3)
         normals   = self.mesh_normals        # (N_tri, 3)
         N_tri = triangles.shape[0]
@@ -85,14 +77,31 @@ class PotentialFlowSolver():
         tri_indices    = np.repeat(np.arange(N_tri), n)        # (N_tri*n,)
 
         return vortex_points, vortex_normals, tri_indices
+    
+    @staticmethod
+    def _solid_angle(centroid, tri_vertices):
+        a, b, c = tri_vertices[0], tri_vertices[1], tri_vertices[2]
+        ra = a - centroid
+        rb = b - centroid
+        rc = c - centroid
+
+        ra_n = np.linalg.norm(ra)
+        rb_n = np.linalg.norm(rb)
+        rc_n = np.linalg.norm(rc)
+
+        # Numerator: scalar triple product
+        numerator = np.dot(ra, np.cross(rb, rc))
+        # Denominator
+        denominator = (ra_n * rb_n * rc_n
+                       + np.dot(ra, rb) * rc_n
+                       + np.dot(rb, rc) * ra_n
+                       + np.dot(rc, ra) * rb_n)
+
+        # arctan2 to get the signed solid angle; multiply by 2
+        omega = 2.0 * np.arctan2(numerator, denominator)
+        return abs(omega)
 
     def gammas_VPM(self, centroids, normals, vortex_points, vortex_normals, V_inf):
-        """
-        Solve for one gamma per triangle.
-        Influence of triangle j on collocation point i:
-            sum over all n vortex points in j of the source term,
-            divided by n so strength is per-unit-triangle.
-        """
         N_tri = centroids.shape[0]
         n     = self.n
         A     = np.zeros((N_tri, N_tri))
@@ -101,8 +110,11 @@ class PotentialFlowSolver():
             ni = normals[i]
             for j in range(N_tri):
                 if i == j:
-                    A[i, j] = 0.5
+                    omega = self._solid_angle(centroids[i],
+                                              self.mesh_triangles[i])
+                    A[i, j] = omega / (4.0 * np.pi)
                     continue
+
                 # Indices of the n vortex points belonging to triangle j
                 mask = (self.tri_indices == j)
                 vp   = vortex_points[mask]        # (n, 3)
@@ -113,66 +125,62 @@ class PotentialFlowSolver():
                     if r < 1e-12:
                         continue
                     influence += np.dot(r_vect / (4 * np.pi * r**3), ni)
-                A[i, j] = influence / n  # average over the sheet
+                A[i, j] = influence
 
         RHS    = -np.dot(normals, V_inf)
         gammas = np.linalg.solve(A, RHS)
         return gammas
 
-    def uniform_flow(self, x, y, z, U, V, W):
-        return U * x + V * y + W * z
+    def uniform_flow_velocity(self, V_inf):
+        """
+        Return the uniform free-stream velocity vector (same everywhere).
+        This is separate from the scalar potential — the velocity is V_inf,
+        not a scalar function of position.
+        """
+        return np.asarray(V_inf, dtype=float)
 
-    def point_vortex(self, x, y, z, x0, y0, z0, gamma):
-        return -gamma / (4 * np.pi * np.sqrt(
-            (x - x0 + 1e-8)**2 + (y - y0 + 1e-8)**2 + (z - z0 + 1e-8)**2))
+    def source_velocity(self, grid_points, x0, gamma):
+        r_vec = grid_points - x0[None, :]          # (M, 3)
+        r2    = np.sum(r_vec**2, axis=1)            # (M,)
+        # Regularise to avoid division by zero at the source location
+        r2    = np.maximum(r2, 1e-12)
+        r3    = r2 * np.sqrt(r2)                    # |r|^3,  shape (M,)
+        return gamma * r_vec / (4.0 * np.pi * r3[:, None])  # (M, 3)
 
     def generate_flow_field(self, x, y, z):
-        grid_points = np.stack([x,y,z], axis=-1).reshape(-1,3)
+        grid_points = np.stack([x, y, z], axis=-1).reshape(-1, 3)  # (M, 3)
 
-        is_inside = self.mesh.contains(grid_points)
+        is_inside = self.mesh.contains(grid_points)                 # (M,)
 
-        self.vel_stream = self.uniform_flow(x, y, z, *self.V_inf)
+        vel = np.tile(self.V_inf.astype(float), (grid_points.shape[0], 1))  # (M, 3)
 
-        for i, (point, gamma_i) in enumerate(
-                zip(self.vortex_points, self.gammas[self.tri_indices])):
-            self.vel_stream += self.point_vortex(
-                x, y, z, *point, gamma=gamma_i / self.n)
+        for k, point in enumerate(self.vortex_points):
+            j       = self.tri_indices[k]
+            gamma_k = self.gammas[j] / self.n      # sub-point strength
+            vel    += self.source_velocity(grid_points, point, gamma_k)
 
-        u, v, w = jnp.gradient(self.vel_stream,
-                                x[:, 0, 0],
-                                y[0, :, 0],
-                                z[0, 0, :])
+        # Zero velocity inside the body
+        # print(is_inside)
+        vel[is_inside, :] = np.zeros(((is_inside).sum(), 3))
+        # print(vel)
 
-        u_f = u.ravel()
-        v_f = v.ravel()
-        w_f = w.ravel()
-
-        u_f = u_f.at[is_inside].set(0.0)
-        v_f = v_f.at[is_inside].set(0.0)
-        w_f = w_f.at[is_inside].set(0.0)
-
-        vels = np.vstack([u_f, v_f, w_f]).T
-
-        return vels
+        return vel
 
 
 if __name__ == "__main__":
     res = 10
-    V_inf = np.array([10, 0, 0])
+    V_inf = np.array([10.0, 0.0, 0.0])
     x, y, z = np.meshgrid(np.linspace(-2, 2, res),
                            np.linspace(-2, 2, res),
                            np.linspace(-2, 2, res),
                            indexing='ij')
 
-    potentialFlowSolve = PotentialFlowSolver(V_inf, 'inputs/sphere.stl', n_vortices_per_tri=3)
+    potentialFlowSolve = PotentialFlowSolver(V_inf, 'inputs/sphere.stl',
+                                             n_vortices_per_tri=3)
     flowvel = potentialFlowSolve.generate_flow_field(x, y, z)
-    print(flowvel.shape)
 
-    grid = np.stack([x,y,z], axis=-1).reshape(-1,3)
+    # grid = np.stack([x, y, z], axis=-1).reshape(-1, 3)
 
-    ax = plt.figure().add_subplot(projection='3d')
-    ax.quiver(*grid.T, *flowvel.T, length=0.1, normalize=True)
-    plt.show()
-
-
-    print(flowvel.shape)
+    # ax = plt.figure().add_subplot(projection='3d')
+    # ax.quiver(*grid.T, *flowvel.T, length=0.1, normalize=True)
+    # plt.show()

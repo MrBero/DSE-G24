@@ -10,7 +10,7 @@ import os
 seed = 7
 rnd.seed(seed)
 
-def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_samples=2000):
+def sample(field_path, stl_mesh, samples=None, method="CSV", epsilon=0.02, num_samples=2000):
     ''' GROUND TRUTH SUBSAMPLING FUNCTION
     \nInputs
     \nfield_path -- path to the field data (csv) of the underlying CFD truth
@@ -34,13 +34,15 @@ def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_
     bounds = np.array([[x_min, x_max],[y_min, y_max],[z_min, z_max]])
 
     # Load wall data and construct tree for optimized distance checking
-    wall_df = pd.read_csv(wall_path)
-    wall_df.columns = wall_df.columns.str.strip()
+    # wall_df = pd.read_csv(wall_path)
+    # wall_df.columns = wall_df.columns.str.strip()
+
+    wall_points = stl_mesh.vertices
     
-    if 'x-coordinate' in wall_df.columns:
-        wall_points = wall_df[['x-coordinate', 'y-coordinate', 'z-coordinate']].values
-    else:
-        wall_points = wall_df.iloc[:, :3].values 
+    # if 'x-coordinate' in wall_df.columns:
+    #     wall_points = wall_df[['x-coordinate', 'y-coordinate', 'z-coordinate']].values
+    # else:
+    #     wall_points = wall_df.iloc[:, :3].values 
 
     wall_tree = sp.spatial.cKDTree(wall_points)
 
@@ -119,4 +121,4 @@ def sample(field_path, wall_path, samples=None, method="CSV", epsilon=0.02, num_
         columns=columns
     )
         
-    return results_df, bounds, wall_df
+    return results_df, bounds
