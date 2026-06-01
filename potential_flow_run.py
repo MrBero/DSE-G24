@@ -1,178 +1,415 @@
-import matplotlib.pyplot as plt
+"""
+vortex_sheet_solver.py
+======================
+
+General potential-flow solver for an ARBITRARY closed body, written from
+scratch, with fully automatic mesh conditioning and post-processing.
+
+Formulation
+-----------
+For a closed, non-lifting body the divergence-free disturbance field that
+enforces no-penetration is a SURFACE SOURCE SHEET (a bound vortex sheet on a
+closed bluff body carries no net circulation and would need a Kutta condition
+to be unique -- it is the source distribution that turns the flow). We use a
+constant-strength source-panel method:
+
+    panel k carries source density sigma_k
+    velocity of a point source q at x0:  u = q (x-x0) / (4 pi |x-x0|^3)
+    no-penetration at every centroid i:  (V_inf + sum_k u_ik) . n_i = 0
+    -> linear system  A sigma = -(V_inf . n),  with exact self term +1/2.
+
+Panels are integrated with 4-point Gauss quadrature.
+
+Automatic handling for ANY geometry
+------------------------------------
+* Mesh conditioning (`condition_mesh`): merges duplicate vertices, fixes
+  winding/normals, and adaptively SUBDIVIDES any face longer than a target
+  edge length (a fraction of the body diagonal) so coarse inputs like a
+  324-panel prism are refined before solving. A hard panel cap keeps the dense
+  linear solve tractable.
+* Post-processing parameters (color clip, near-surface mask distance, slice
+  positions, domain padding) are all DERIVED FROM THE MESH, never hard-coded,
+  so plots are sensible for a 1-unit sphere or a 5000-unit tower alike.
+
+Run directly to validate on a sphere and visualise any STL passed as argv[1]
+(defaults to the uploaded triangle.stl).
+"""
+
+import sys
 import numpy as np
-import jax.numpy as jnp
 import trimesh
+import matplotlib.pyplot as plt
 
-class PotentialFlowSolver():
-    def __init__(self, V_inf, stl_filepath, n_vortices_per_tri=4):
-        self.mesh = trimesh.load_mesh(stl_filepath)
-        self.mesh_centers = self.mesh.triangles_center
-        self.mesh_normals = self.mesh.face_normals
-        self.mesh_triangles = self.mesh.triangles  # (N_tri, 3, 3)
-        self.V_inf = V_inf
-        self.n = n_vortices_per_tri
 
-        # Generate vortex sheet points and their associated normals
-        self.vortex_points, self.vortex_normals, self.tri_indices = \
-            self._generate_vortex_sheet_points()
+# 4-point degree-3 triangle quadrature (barycentric) ------------------------- #
+_BARY = np.array([[1/3, 1/3, 1/3],
+                  [0.6, 0.2, 0.2],
+                  [0.2, 0.6, 0.2],
+                  [0.2, 0.2, 0.6]])
+_WTS = np.array([-27/48, 25/48, 25/48, 25/48])
 
-        self.gammas = self.gammas_VPM(
-            self.mesh_centers,
-            self.mesh_normals,
-            self.vortex_points,
-            self.vortex_normals,
-            V_inf=self.V_inf
-        )
 
-    def _generate_vortex_sheet_points(self):
+# =========================================================================== #
+#  Automatic mesh conditioning                                                 #
+# =========================================================================== #
+def condition_mesh(mesh, target_edge_frac=0.06, max_panels=3000, verbose=True):
+    """
+    Make an arbitrary input mesh suitable for panel solving.
+
+    1. merge duplicate vertices / drop degenerate + duplicate faces
+    2. fix normals to point consistently outward
+    3. adaptively subdivide faces whose longest edge exceeds
+       target_edge_frac * body_diagonal, until none remain or the panel cap
+       is reached.
+    """
+    m = mesh.copy()
+    m.merge_vertices()
+    m.update_faces(m.nondegenerate_faces())
+    m.update_faces(m.unique_faces())
+    m.remove_unreferenced_vertices()
+    try:
+        m.fix_normals()
+    except Exception:
+        pass
+
+    diag = float(np.linalg.norm(m.extents))
+    target = target_edge_frac * diag
+
+    def longest_edges(mm):
+        tri = mm.triangles
+        e = np.stack([
+            np.linalg.norm(tri[:, 1] - tri[:, 0], axis=1),
+            np.linalg.norm(tri[:, 2] - tri[:, 1], axis=1),
+            np.linalg.norm(tri[:, 0] - tri[:, 2], axis=1),
+        ], axis=1)
+        return e.max(axis=1)
+
+    for _ in range(12):
+        le = longest_edges(m)
+        too_big = le > 1.5 * target          # hysteresis: only clearly-coarse faces
+        # stop if nothing coarse, or if subdividing would blow the cap (each
+        # flagged face -> 4 faces)
+        projected = m.faces.shape[0] + 3 * int(np.sum(too_big))
+        if not np.any(too_big) or projected > max_panels:
+            break
+        v, f = trimesh.remesh.subdivide(
+            m.vertices, m.faces, face_index=np.where(too_big)[0])
+        m = trimesh.Trimesh(vertices=v, faces=f, process=True)
+        try:
+            m.fix_normals()
+        except Exception:
+            pass
+
+    if verbose:
+        print(f"  conditioned mesh: {m.faces.shape[0]} panels "
+              f"(target edge {target:.3g}, body diag {diag:.3g}, "
+              f"watertight={m.is_watertight})")
+    return m
+
+
+# =========================================================================== #
+#  Solver                                                                      #
+# =========================================================================== #
+class VortexSheetSolver:
+    def __init__(self, mesh, V_inf, auto_condition=True,
+                 target_edge_frac=0.06, max_panels=3000, verbose=True):
+        raw = trimesh.load_mesh(mesh) if isinstance(mesh, (str, bytes)) else mesh.copy()
+        self.raw_mesh = raw
+        self.mesh = condition_mesh(raw, target_edge_frac, max_panels, verbose) \
+            if auto_condition else raw
+        self.V_inf = np.asarray(V_inf, dtype=float)
+
+        self.tris    = np.asarray(self.mesh.triangles)
+        self.centers = np.asarray(self.mesh.triangles_center)
+        self.normals = np.asarray(self.mesh.face_normals)
+        self.areas   = np.asarray(self.mesh.area_faces)
+        self.N = self.tris.shape[0]
+
+        A, B, C = self.tris[:, 0], self.tris[:, 1], self.tris[:, 2]
+        self.qpts = (A[:, None, :] * _BARY[None, :, 0, None] +
+                     B[:, None, :] * _BARY[None, :, 1, None] +
+                     C[:, None, :] * _BARY[None, :, 2, None])
+        self.qwts = _WTS
+
+        # geometry-derived post-processing scales
+        self.diag = float(np.linalg.norm(self.mesh.extents))
+        self.mask_dist = 0.015 * self.diag
+
+        self.sigma = self._solve()
+
+    def _panel_velocity(self, field_pts):
+        diff = field_pts[:, None, None, :] - self.qpts[None, :, :, :]
+        r = np.linalg.norm(diff, axis=-1)
+        r = np.maximum(r, 1e-12)
+        kern = diff / (4.0 * np.pi * r[..., None] ** 3)
+        return np.einsum('pnqk,q->pnk', kern, self.qwts) * self.areas[None, :, None]
+
+    def _solve(self, chunk=512):
+        # Assemble A row-block by row-block so we never hold the full
+        # (N, N, Q, 3) tensor in memory at once.
+        N = self.N
+        A = np.empty((N, N))
+        for s in range(0, N, chunk):
+            e = min(s + chunk, N)
+            vel = self._panel_velocity(self.centers[s:e])     # (b, N, 3)
+            A[s:e] = np.einsum('ink,ik->in', vel, self.normals[s:e])
+        np.fill_diagonal(A, 0.5)                 # exact flat-panel self term
+        rhs = -self.normals @ self.V_inf
+        return np.linalg.solve(A, rhs)
+
+    def velocity(self, pts, blank_interior=True, blank_near=True, chunk=None):
+        pts = np.asarray(pts, dtype=float)
+        P = pts.shape[0]
+        if chunk is None:
+            # keep the (chunk, N, Q, 3) working array near ~50M floats
+            chunk = max(64, int(12_000_000 / max(self.N, 1)))
+        out = np.tile(self.V_inf, (P, 1)).astype(float)
+        for s in range(0, P, chunk):
+            e = min(s + chunk, P)
+            vel = self._panel_velocity(pts[s:e])
+            out[s:e] += np.einsum('pnk,n->pk', vel, self.sigma)
+        if blank_interior:
+            try:
+                out[self.mesh.contains(pts)] = np.nan
+            except Exception:
+                pass
+        if blank_near:
+            try:
+                from trimesh.proximity import closest_point
+                _, dist, _ = closest_point(self.mesh, pts)
+                out[dist < self.mask_dist] = np.nan
+            except Exception:
+                pass
+        return out
+
+    def bc_residual(self):
+        vel = self._panel_velocity(self.centers)
+        idx = np.arange(self.N)
+        vel[idx, idx, :] = 0.0
+        induced = np.einsum('ink,n->ik', vel, self.sigma)
+        vn = (np.einsum('ik,ik->i', induced, self.normals)
+              + 0.5 * self.sigma + self.normals @ self.V_inf)
+        return float(np.abs(vn).max())
+
+    def net_source(self):
+        return float(np.sum(self.sigma * self.areas))
+
+
+# =========================================================================== #
+#  Automatic slice plotting (all params derived from geometry)                 #
+# =========================================================================== #
+def plot_slice(solver, axis='z', frac=0.5, n=160, pad_frac=0.8,
+               ax=None, title=None, clip_pct=99.0):
+    lo, hi = solver.mesh.bounds
+    span = hi - lo
+    pad = pad_frac * span
+    lo2, hi2 = lo - pad, hi + pad
+    ai = {'x': 0, 'y': 1, 'z': 2}[axis]
+    a0, a1 = [i for i in range(3) if i != ai]
+
+    g0 = np.linspace(lo2[a0], hi2[a0], n)
+    g1 = np.linspace(lo2[a1], hi2[a1], n)
+    G0, G1 = np.meshgrid(g0, g1, indexing='xy')
+    coord = lo[ai] + frac * span[ai]
+
+    pts = np.zeros((G0.size, 3))
+    pts[:, a0] = G0.ravel(); pts[:, a1] = G1.ravel(); pts[:, ai] = coord
+
+    vel = solver.velocity(pts)
+    speed = np.linalg.norm(vel, axis=1).reshape(G0.shape)
+    Va = vel[:, a0].reshape(G0.shape)
+    Vb = vel[:, a1].reshape(G0.shape)
+
+    finite = speed[np.isfinite(speed)]
+    vmax = np.percentile(finite, clip_pct) if finite.size else 1.0
+    vmax = max(vmax, np.linalg.norm(solver.V_inf) * 1.05)
+
+    own = ax is None
+    if own:
+        _, ax = plt.subplots(figsize=(7, 6))
+
+    pc = ax.contourf(G0, G1, np.clip(speed, 0, vmax), levels=40,
+                     cmap='viridis', vmin=0, vmax=vmax)
+    plt.colorbar(pc, ax=ax, label='|velocity|')
+
+    mask = ~np.isfinite(speed)
+    ax.streamplot(g0, g1, np.where(mask, 0.0, Va), np.where(mask, 0.0, Vb),
+                  color='white', density=1.5, linewidth=0.7, arrowsize=0.8)
+
+    origin = [0.0, 0.0, 0.0]; origin[ai] = coord
+    try:
+        sec = solver.mesh.section(plane_origin=origin, plane_normal=np.eye(3)[ai])
+        if sec is not None:
+            p2, _ = sec.to_2D()
+            for ent in p2.entities:
+                v = p2.vertices[ent.points]
+                ax.fill(v[:, 0], v[:, 1], color='0.25', zorder=5)
+                ax.plot(v[:, 0], v[:, 1], 'k-', lw=1.2, zorder=6)
+    except Exception:
+        pass
+
+    labels = ['x', 'y', 'z']
+    ax.set_xlabel(labels[a0]); ax.set_ylabel(labels[a1])
+    ax.set_aspect('equal')
+    ax.set_xlim(lo2[a0], hi2[a0]); ax.set_ylim(lo2[a1], hi2[a1])
+    ax.set_title(title or f'{axis}={coord:.3g} slice')
+    return ax
+
+
+# =========================================================================== #
+#  Backward-compatible wrapper for the original main.py interface              #
+# =========================================================================== #
+class PotentialFlowSolver:
+    """
+    Drop-in replacement for the original PotentialFlowSolver, so existing
+    main.py code runs unchanged:
+
+        pf = PotentialFlowSolver(V_inf, stl_mesh, n_vortices_per_tri=1)
+        field = pf.generate_flow_field(x, y, z)   # -> (N, 3)
+        pf.mesh.vertices                          # still available
+
+    Internally this is the validated constant-strength source-panel
+    VortexSheetSolver with automatic mesh conditioning. `n_vortices_per_tri`
+    is accepted for signature compatibility but is no longer needed (the panel
+    integration uses fixed Gauss quadrature); it is ignored aside from a note.
+
+    generate_flow_field returns velocities matching
+    np.stack([x, y, z], -1).reshape(-1, 3), with interior points set to 0.0
+    (as the original did) so downstream griddata / GP residuals are unaffected.
+    """
+
+    def __init__(self, V_inf, stl_mesh, n_vortices_per_tri=1,
+                 auto_condition=True, verbose=True):
+        # NOTE: original signature is (V_inf, mesh, ...). Keep that order.
+        self._solver = VortexSheetSolver(
+            stl_mesh, V_inf, auto_condition=auto_condition, verbose=verbose)
+        self.V_inf = self._solver.V_inf
+        self.mesh = self._solver.mesh          # exposed for main.py's scatter plot
+        self.n = n_vortices_per_tri            # kept only for compatibility
+
+    def generate_flow_field(self, x, y, z, zero_inside=True):
         """
-        Distribute n vortex points inside each triangle using
-        stratified barycentric sampling, then convert to 3D coords.
-        Returns:
-            vortex_points  : (N_tri * n, 3)
-            vortex_normals : (N_tri * n, 3)  — same normal for all points in a tri
-            tri_indices    : (N_tri * n,)    — which triangle each vortex belongs to
+        Evaluate total velocity on a meshgrid.
+        x, y, z : arrays of identical shape (any meshgrid indexing)
+        returns : (N, 3) ordered like np.stack([x, y, z], -1).reshape(-1, 3)
         """
-        triangles = self.mesh_triangles      # (N_tri, 3, 3)
-        normals   = self.mesh_normals        # (N_tri, 3)
-        N_tri = triangles.shape[0]
-        n = self.n
+        grid_points = np.stack([x, y, z], axis=-1).reshape(-1, 3)
+        # Do NOT NaN-blank here: the original set interior velocities to 0.0,
+        # and downstream griddata/GP code expects finite numbers everywhere.
+        vel = self._solver.velocity(
+            grid_points, blank_interior=False, blank_near=False)
+        if zero_inside:
+            try:
+                inside = self.mesh.contains(grid_points)
+                vel[inside] = 0.0
+            except Exception:
+                pass
+        return vel
 
-        # --- stratified barycentric coordinates ---
-        # Build a grid of (u, v) such that u + v <= 1
-        # For n points, use a triangular lattice with ~sqrt(2n) steps
-        k = int(np.ceil((-1 + np.sqrt(1 + 8 * n)) / 2))  # largest k s.t. k*(k+1)/2 <= n
-        coords = []
-        for i in range(k + 1):
-            for j in range(k + 1 - i):
-                coords.append((i / k, j / k))
-                if len(coords) == n:
-                    break
-            if len(coords) == n:
-                break
+    # convenience pass-throughs
+    def bc_residual(self):
+        return self._solver.bc_residual()
 
-        # Pad or trim to exactly n points
-        while len(coords) < n:
-            # Fill remaining slots with centroid
-            coords.append((1/3, 1/3))
-        coords = np.array(coords[:n])  # (n, 2)
-
-        u = coords[:, 0]  # (n,)
-        v = coords[:, 1]  # (n,)
-        w = 1.0 - u - v   # (n,)  barycentric third coord
-
-        # Clamp any numerical negatives
-        w = np.clip(w, 0, None)
-        # Renormalise
-        total = u + v + w
-        u, v, w = u / total, v / total, w / total
-
-        # Convert barycentric -> 3D:  p = u*A + v*B + w*C
-        # triangles: (N_tri, 3, 3)  ->  A=(N_tri,3), B=(N_tri,3), C=(N_tri,3)
-        A = triangles[:, 0, :]  # (N_tri, 3)
-        B = triangles[:, 1, :]
-        C = triangles[:, 2, :]
-
-        # Broadcast: (N_tri, 1, 3) * (1, n, 1)  -> (N_tri, n, 3)
-        points_3d = (
-            A[:, None, :] * u[None, :, None] +
-            B[:, None, :] * v[None, :, None] +
-            C[:, None, :] * w[None, :, None]
-        )  # (N_tri, n, 3)
-
-        vortex_points  = points_3d.reshape(-1, 3)              # (N_tri*n, 3)
-        vortex_normals = np.repeat(normals, n, axis=0)         # (N_tri*n, 3)
-        tri_indices    = np.repeat(np.arange(N_tri), n)        # (N_tri*n,)
-
-        return vortex_points, vortex_normals, tri_indices
-
-    def gammas_VPM(self, centroids, normals, vortex_points, vortex_normals, V_inf):
-        """
-        Solve for one gamma per triangle.
-        Influence of triangle j on collocation point i:
-            sum over all n vortex points in j of the source term,
-            divided by n so strength is per-unit-triangle.
-        """
-        N_tri = centroids.shape[0]
-        n     = self.n
-        A     = np.zeros((N_tri, N_tri))
-
-        for i in range(N_tri):
-            ni = normals[i]
-            for j in range(N_tri):
-                if i == j:
-                    A[i, j] = 0.5
-                    continue
-                # Indices of the n vortex points belonging to triangle j
-                mask = (self.tri_indices == j)
-                vp   = vortex_points[mask]        # (n, 3)
-                influence = 0.0
-                for k in range(n):
-                    r_vect = centroids[i] - vp[k]
-                    r      = np.linalg.norm(r_vect)
-                    if r < 1e-12:
-                        continue
-                    influence += np.dot(r_vect / (4 * np.pi * r**3), ni)
-                A[i, j] = influence / n  # average over the sheet
-
-        RHS    = -np.dot(normals, V_inf)
-        gammas = np.linalg.solve(A, RHS)
-        return gammas
-
-    def uniform_flow(self, x, y, z, U, V, W):
-        return U * x + V * y + W * z
-
-    def point_vortex(self, x, y, z, x0, y0, z0, gamma):
-        return -gamma / (4 * np.pi * np.sqrt(
-            (x - x0 + 1e-8)**2 + (y - y0 + 1e-8)**2 + (z - z0 + 1e-8)**2))
-
-    def generate_flow_field(self, x, y, z):
-        grid_points = np.stack([x,y,z], axis=-1).reshape(-1,3)
-
-        is_inside = self.mesh.contains(grid_points)
-
-        self.vel_stream = self.uniform_flow(x, y, z, *self.V_inf)
-
-        for i, (point, gamma_i) in enumerate(
-                zip(self.vortex_points, self.gammas[self.tri_indices])):
-            self.vel_stream += self.point_vortex(
-                x, y, z, *point, gamma=gamma_i / self.n)
-
-        u, v, w = jnp.gradient(self.vel_stream,
-                                x[:, 0, 0],
-                                y[0, :, 0],
-                                z[0, 0, :])
-
-        u_f = u.ravel()
-        v_f = v.ravel()
-        w_f = w.ravel()
-
-        u_f = u_f.at[is_inside].set(0.0)
-        v_f = v_f.at[is_inside].set(0.0)
-        w_f = w_f.at[is_inside].set(0.0)
-
-        vels = np.vstack([u_f, v_f, w_f]).T
-
-        return vels
+    def net_source(self):
+        return self._solver.net_source()
 
 
-if __name__ == "__main__":
-    res = 10
-    V_inf = np.array([10, 0, 0])
-    x, y, z = np.meshgrid(np.linspace(-2, 2, res),
-                           np.linspace(-2, 2, res),
-                           np.linspace(-2, 2, res),
-                           indexing='ij')
+def auto_visualize(solver, savepath=None, show=False):
+    """
+    Choose slices automatically using BOTH the flow direction and geometry.
 
-    potentialFlowSolve = PotentialFlowSolver(V_inf, 'inputs/sphere.stl', n_vortices_per_tri=3)
-    flowvel = potentialFlowSolve.generate_flow_field(x, y, z)
-    print(flowvel.shape)
+    Wind direction picks the most informative cuts:
+      * a plane PERPENDICULAR to the flow's dominant axis at the body centre
+        -> shows how flow wraps the cross-section it actually sees;
+      * a plane CONTAINING the flow (normal = a transverse axis) at centre
+        -> shows fore/aft stagnation and the over-body deflection;
+      * a second perpendicular-to-flow slice offset toward one end.
+    All positions are fractions of the body extent, so they scale to any size.
+    """
+    name = {0: 'x', 1: 'y', 2: 'z'}
+    V = solver.V_inf
+    flow_axis = int(np.argmax(np.abs(V))) if np.linalg.norm(V) > 0 else 0
+    ext = solver.mesh.extents
 
-    grid = np.stack([x,y,z], axis=-1).reshape(-1,3)
+    # For a clear "flow wraps the body" picture we want a slice plane that
+    # CONTAINS the flow vector (so streamlines stay in-plane) and is normal to
+    # the axis the body is most extruded along. That normal is the largest
+    # extent among the non-flow axes -> the cross-section the flow really sees.
+    non_flow = [i for i in range(3) if i != flow_axis]
+    wrap_normal = non_flow[int(np.argmax(ext[non_flow]))]   # in-plane: flow + other axis
+    # A complementary plane, also containing the flow, normal = the remaining axis
+    other_normal = [i for i in non_flow if i != wrap_normal][0]
 
-    ax = plt.figure().add_subplot(projection='3d')
-    ax.quiver(*grid.T, *flowvel.T, length=0.1, normalize=True)
+    fig, axs = plt.subplots(1, 3, figsize=(19, 5.8))
+    plot_slice(solver, axis=name[wrap_normal], frac=0.5, ax=axs[0],
+               title=f'flow-plane (perp {name[wrap_normal]}, mid): wraps section')
+    plot_slice(solver, axis=name[other_normal], frac=0.5, ax=axs[1],
+               title=f'flow-plane (perp {name[other_normal]}, mid): stagnation & wake')
+    plot_slice(solver, axis=name[wrap_normal], frac=0.2, ax=axs[2],
+               title=f'flow-plane (perp {name[wrap_normal]}, off-centre)')
+    fig.tight_layout()
+    if savepath:
+        fig.savefig(savepath, dpi=110)
+    if show:
+        plt.show()
+    return fig
+
+
+# =========================================================================== #
+#  Validation + demo                                                           #
+# =========================================================================== #
+def validate_sphere(verbose=True):
+    sph = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+    U = 10.0
+    s = VortexSheetSolver(sph, [U, 0, 0], verbose=verbose)
+    rp = 1.15
+    c = s.centers
+    th = np.arccos(np.clip(c[:, 0] / np.linalg.norm(c, axis=1), -1, 1))
+    probe = c / np.linalg.norm(c, axis=1, keepdims=True) * rp
+    spd = np.linalg.norm(s.velocity(probe, blank_interior=False,
+                                    blank_near=False), axis=1)
+    vr = U * np.cos(th) * (1 - 1 / rp**3)
+    vt = -U * np.sin(th) * (1 + 1 / (2 * rp**3))
+    an = np.sqrt(vr**2 + vt**2)
+    err = np.abs(spd - an) / an
+    if verbose:
+        print(f"  SPHERE  BC residual {s.bc_residual():.2e}  "
+              f"net source {s.net_source():.2e}  field err {err.mean():.3%}")
+    return s
+
+
+def main():
+    stl = sys.argv[1] if len(sys.argv) > 1 else 'inputs/triangle.stl'
+    print("=== Validation: flow past a sphere ===")
+    s_sphere = validate_sphere()
+
+    fig1, axs = plt.subplots(1, 2, figsize=(13, 5.5))
+    plot_slice(s_sphere, axis='z', frac=0.5, ax=axs[0],
+               title='Sphere: z=0 (fore-aft symmetric)')
+    U, rp = 10.0, 1.15
+    th = np.linspace(0.02, np.pi - 0.02, 200)
+    vr = U * np.cos(th) * (1 - 1 / rp**3); vt = -U * np.sin(th) * (1 + 1 / (2 * rp**3))
+    axs[1].plot(np.degrees(th), np.sqrt(vr**2 + vt**2), 'k-', lw=2, label='analytic')
+    c = s_sphere.centers
+    thc = np.arccos(np.clip(c[:, 0] / np.linalg.norm(c, axis=1), -1, 1))
+    probe = c / np.linalg.norm(c, axis=1, keepdims=True) * rp
+    spd = np.linalg.norm(s_sphere.velocity(probe, blank_interior=False,
+                                           blank_near=False), axis=1)
+    axs[1].scatter(np.degrees(thc), spd, s=8, c='tab:red', alpha=0.5, label='solver')
+    axs[1].set_xlabel('theta (deg)'); axs[1].set_ylabel('|v| at r=1.15')
+    axs[1].set_title('Sphere field speed vs analytic')
+    axs[1].legend(); axs[1].grid(alpha=0.3)
+    fig1.tight_layout(); fig1.savefig('fig_validation_sphere.png', dpi=110)
+
+    print(f"\n=== Arbitrary geometry: {stl} ===")
+    solver = VortexSheetSolver(stl, [10.0, 0.0, 0.0])
+    rel = solver.net_source() / (np.linalg.norm(solver.V_inf) * solver.mesh.area)
+    print(f"  BC residual {solver.bc_residual():.2e}   "
+          f"net source {solver.net_source():.2e}   (rel {rel:.2%})")
+    auto_visualize(solver, savepath='fig_geometry.png')
+    print("Saved fig_validation_sphere.png and fig_geometry.png")
     plt.show()
 
 
-    print(flowvel.shape)
+if __name__ == "__main__":
+    main()
