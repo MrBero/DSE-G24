@@ -148,7 +148,8 @@ class PotentialFlowSolver():
         return gamma * r_vec / (4.0 * np.pi * r3[:, None])  # (M, 3)
 
     def generate_flow_field(self, x, y, z):
-        grid_points = np.stack([x, y, z], axis=-1).reshape(-1, 3)  # (M, 3)
+        self.grid_points = np.stack([x, y, z], axis=-1)
+        grid_points = self.grid_points.reshape(-1, 3)
 
         is_inside = self.mesh.contains(grid_points)                 # (M,)
 
@@ -166,9 +167,8 @@ class PotentialFlowSolver():
         return vel
 
     def plot_slice(self, vel, slice):
-        vel_grid = vel.reshape(*x.shape, -1)
-        grid_grid = np.stack([x,y,z], axis=-1)
-        Xs, Ys = grid_grid[:,:,slice,0], grid_grid[:,:,slice,1]
+        vel_grid = vel.reshape(*self.grid_points.shape)
+        Xs, Ys = self.grid_points[:,:,slice,0], self.grid_points[:,:,slice,1]
         us, vs, ws = vel_grid[:,:,slice,0], vel_grid[:,:,slice,1], vel_grid[:,:,slice,2]
         mag = np.sqrt(us**2 + vs**2 + ws**2)
 
@@ -178,7 +178,7 @@ class PotentialFlowSolver():
         ax2.scatter(*self.vortex_points[:,:2].T, c='black')
         ax2.quiver(Xs, Ys, us, vs, color='white')
         ax2.set_aspect('equal')
-        # ax2.set_title(f'xy slice at z={np.linspace(bounds[2,0],bounds[2,1],res)[k]:.2f}')
+        ax2.set_title(f'Potential Flow xy slice at {slice}')
 
     def plot_3D(self, vel):
         grid = np.stack([x, y, z], axis=-1).reshape(-1, 3)

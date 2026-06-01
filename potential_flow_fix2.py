@@ -156,7 +156,7 @@ if __name__ == "__main__":
         indexing='ij'
     )
 
-    stl_mesh = trimesh.load_mesh('inputs/triangle.stl')
+    stl_mesh = trimesh.load_mesh('input_stls/triangle.stl')
     stl_mesh.apply_scale(1/1000)
 
     solver = PotentialFlowSolver(V_inf, stl_mesh)

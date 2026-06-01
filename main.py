@@ -1,5 +1,11 @@
 import numpy as np
+import scipy.interpolate
+
 import matplotlib.pyplot as plt
+import matplotlib.style as mplstyle
+plt.style.use('dark_background')
+mplstyle.use('fast')
+
 import os
 os.environ['JAX_PLATFORMS'] = 'cpu' #if jax CUDA is installed, then we force cpu in this case. comment if gpu compute is preferred
 import time
@@ -8,10 +14,9 @@ import jax.numpy as jnp
 from jax.scipy.linalg import cho_factor, cho_solve
 import jax.scipy.optimize
 jax.config.update("jax_enable_x64", True)
-import scipy.interpolate
 import trimesh
 
-from potential_flow_fix import PotentialFlowSolver
+from potential_flow_run import VortexSheetSolver, plot_slice
 from sampling import sample
 
 def matern52_np(v1, v2, ell, var):
@@ -73,16 +78,22 @@ def fit_hyperparams(train_coords, train_vels, n_restarts=4, jitter=1e-6, seed=0)
     f, t, ok = best
     return {'ell': t[0:3], 'var': float(t[3]), 'noise': float(t[4]), 'nll': f, 'success': ok}
 
-stl_filepath = 'inputs/cylinder.stl' #TODO the cylinder right now does not have enough grid points
+stl_filepath = 'input_stls/triangle.stl' #TODO the cylinder right now does not have enough grid points
 stl_mesh = trimesh.load_mesh(stl_filepath) #cylinder: 2.75cm height, 6mm diameter centered at 3.2cm at the x, 1.2cm at the y
+stl_mesh.apply_scale(1/1000) #from mm to m
+
 #ground truth values or real world measurements; 'training' for GPR
 training_point_n = 100 #number of training points (drones)
 res = 25 #test points resolution
 
 
-ground_truth, bounds = sample('inputs/Field.csv', stl_mesh, method='random', num_samples=training_point_n)
+# bounds = np.array([[-5,5],[-5,5],[0,10]])
+ground_truth, bounds = sample('inputs/FLTG.csv', stl_mesh, 
+                            #   bounds = bounds, 
+                              method='random', num_samples=training_point_n)
 training_coords = ground_truth[['x-target', 'y-target', 'z-target']].to_numpy() #leave unflattened for functionality
 training_vels = ground_truth[['x-velocity','y-velocity','z-velocity']].to_numpy().reshape(-1,1) #flatten to match dims in equation 1.7
+
 
 #test points to points at which we seek GPR to evaluate the field
 x,y,z = np.meshgrid(np.linspace(bounds[0,0], bounds[0,1], res), 
@@ -96,11 +107,15 @@ print(f"Total number of training points: {training_point_n}\nTotal number of tes
 
 tick = time.thread_time()
 V_inf = np.array([10, 0, 0]) #TODO this has to be updated to the inlet conditions of the cfd!!!
-potential_flow_solver = PotentialFlowSolver(V_inf, stl_mesh, n_vortices_per_tri=1)
+surface_source_solver = VortexSheetSolver(V_inf = V_inf, mesh = stl_mesh, 
+                                          auto_condition=True, target_edge_frac=0.06, max_panels=3000)
 
 print(test_points.shape)
-potential_flow_field = potential_flow_solver.generate_flow_field(x, y, z)  # keep as (N, 3), drop the .reshape(-1,1)
-plt.show()
+potential_flow_field = surface_source_solver.generate_flow_field(x, y, z)  # keep as (N, 3), drop the .reshape(-1,1)
+fig_pot, ax_pot = plt.subplots(figsize=(7, 6))
+plot_slice(surface_source_solver, axis='z', frac=0.5, ax=ax_pot,
+               title='Potential flow field around object')
+
 means_tests = potential_flow_field  # already (N, 3) matching test_points
 
 means_training = scipy.interpolate.griddata(
@@ -109,6 +124,9 @@ means_training = scipy.interpolate.griddata(
     xi=training_coords,           # (M, 3)
     method='linear'
 ).reshape(-1,1)
+
+# means_tests = np.zeros_like(potential_flow_field)
+# means_training = 0
 
 tock = time.thread_time()
 print(f'Prior means potential field calculated in: {tock-tick:.3f}s')
@@ -150,11 +168,15 @@ print(f'GPR Posterior generated in {tock-tick:.3f}s')
 print(GPR_posterior.shape)
 
 GPR_posterior_reshaped = np.array(GPR_posterior).reshape(-1,3)
+GPR_vel_mags = np.sqrt((GPR_posterior_reshaped**2).sum(axis=1))
+print(GPR_vel_mags.shape)
 
-
-# ax = plt.figure().add_subplot(projection='3d')
-# ax.quiver(*test_points.T, *GPR_posterior_reshaped.T, length=0.005)
-# plt.show()
+fig1 = plt.figure()
+ax1 = fig1.add_subplot(projection='3d')
+sc = ax1.scatter3D(*test_points.T, c=GPR_vel_mags, alpha=0.2)
+fig1.colorbar(sc, ax=ax1, label='|velocity|')
+ax1.scatter3D(*surface_source_solver.mesh.vertices.T, c='black')
+ax1.set_aspect('equal')
 
 U = GPR_posterior_reshaped.reshape(res, res, res, 3)
 P = test_points.reshape(res, res, res, 3)
@@ -163,13 +185,13 @@ Xs, Ys = P[:, :, k, 0], P[:, :, k, 1]
 us, vs, ws = U[:, :, k, 0], U[:, :, k, 1], U[:, :, k, 2]
 mag = np.sqrt(us**2 + vs**2 + ws**2)
 
-fig, ax = plt.subplots(figsize=(7, 6))
-pc = ax.contourf(Xs, Ys, mag, levels=30, cmap='viridis')
-fig.colorbar(pc, ax=ax, label='|velocity|')
-ax.scatter(*potential_flow_solver.mesh.vertices.T, c='black')
-ax.quiver(Xs, Ys, us, vs, color='white')
-ax.set_aspect('equal')
-ax.set_title(f'xy slice at z={np.linspace(bounds[2,0],bounds[2,1],res)[k]:.2f}')
+fig2, ax2 = plt.subplots(figsize=(7, 6))
+pc = ax2.contourf(Xs, Ys, mag, levels=30, cmap='viridis')
+fig2.colorbar(pc, ax=ax2, label='|velocity|')
+ax2.scatter(*surface_source_solver.mesh.vertices.T, c='black')
+ax2.quiver(Xs, Ys, us, vs, color='white')
+ax2.set_aspect('equal')
+ax2.set_title(f'GPR xy slice at z={np.linspace(bounds[2,0],bounds[2,1],res)[k]:.2f}')
 plt.show()
 
 #TODO add in a GPR for the pressure field

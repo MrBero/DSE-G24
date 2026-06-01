@@ -113,10 +113,9 @@ def condition_mesh(mesh, target_edge_frac=0.06, max_panels=3000, verbose=True):
 class VortexSheetSolver:
     def __init__(self, mesh, V_inf, auto_condition=True,
                  target_edge_frac=0.06, max_panels=3000, verbose=True):
-        raw = trimesh.load_mesh(mesh) if isinstance(mesh, (str, bytes)) else mesh.copy()
-        self.raw_mesh = raw
-        self.mesh = condition_mesh(raw, target_edge_frac, max_panels, verbose) \
-            if auto_condition else raw
+        self.raw_mesh = mesh
+        self.mesh = condition_mesh(self.raw_mesh, target_edge_frac, max_panels, verbose) \
+            if auto_condition else self.raw_mesh
         self.V_inf = np.asarray(V_inf, dtype=float)
 
         self.tris    = np.asarray(self.mesh.triangles)
@@ -194,6 +193,32 @@ class VortexSheetSolver:
     def net_source(self):
         return float(np.sum(self.sigma * self.areas))
 
+    def generate_flow_field(self, x, y, z, zero_inside=True):
+        """
+        Evaluate total velocity on a meshgrid.
+        x, y, z : arrays of identical shape (any meshgrid indexing)
+        returns : (N, 3) ordered like np.stack([x, y, z], -1).reshape(-1, 3)
+        """
+        self.grid_points = np.stack([x, y, z], axis=-1)
+        grid_points = self.grid_points.reshape(-1, 3)
+        # Do NOT NaN-blank here: the original set interior velocities to 0.0,
+        # and downstream griddata/GP code expects finite numbers everywhere.
+        vel = self.velocity(
+            grid_points, blank_interior=False, blank_near=False)
+        if zero_inside:
+            try:
+                inside = self.mesh.contains(grid_points)
+                vel[inside] = 0.0
+            except Exception:
+                pass
+        return vel
+
+    # convenience pass-throughs
+    def bc_residual(self):
+        return self._solver.bc_residual()
+
+    def net_source(self):
+        return self._solver.net_source()
 
 # =========================================================================== #
 #  Automatic slice plotting (all params derived from geometry)                 #
@@ -253,65 +278,8 @@ def plot_slice(solver, axis='z', frac=0.5, n=160, pad_frac=0.8,
     ax.set_aspect('equal')
     ax.set_xlim(lo2[a0], hi2[a0]); ax.set_ylim(lo2[a1], hi2[a1])
     ax.set_title(title or f'{axis}={coord:.3g} slice')
-    return ax
+    return ax        # exposed for main.py's scatter plot
 
-
-# =========================================================================== #
-#  Backward-compatible wrapper for the original main.py interface              #
-# =========================================================================== #
-class PotentialFlowSolver:
-    """
-    Drop-in replacement for the original PotentialFlowSolver, so existing
-    main.py code runs unchanged:
-
-        pf = PotentialFlowSolver(V_inf, stl_mesh, n_vortices_per_tri=1)
-        field = pf.generate_flow_field(x, y, z)   # -> (N, 3)
-        pf.mesh.vertices                          # still available
-
-    Internally this is the validated constant-strength source-panel
-    VortexSheetSolver with automatic mesh conditioning. `n_vortices_per_tri`
-    is accepted for signature compatibility but is no longer needed (the panel
-    integration uses fixed Gauss quadrature); it is ignored aside from a note.
-
-    generate_flow_field returns velocities matching
-    np.stack([x, y, z], -1).reshape(-1, 3), with interior points set to 0.0
-    (as the original did) so downstream griddata / GP residuals are unaffected.
-    """
-
-    def __init__(self, V_inf, stl_mesh, n_vortices_per_tri=1,
-                 auto_condition=True, verbose=True):
-        # NOTE: original signature is (V_inf, mesh, ...). Keep that order.
-        self._solver = VortexSheetSolver(
-            stl_mesh, V_inf, auto_condition=auto_condition, verbose=verbose)
-        self.V_inf = self._solver.V_inf
-        self.mesh = self._solver.mesh          # exposed for main.py's scatter plot
-        self.n = n_vortices_per_tri            # kept only for compatibility
-
-    def generate_flow_field(self, x, y, z, zero_inside=True):
-        """
-        Evaluate total velocity on a meshgrid.
-        x, y, z : arrays of identical shape (any meshgrid indexing)
-        returns : (N, 3) ordered like np.stack([x, y, z], -1).reshape(-1, 3)
-        """
-        grid_points = np.stack([x, y, z], axis=-1).reshape(-1, 3)
-        # Do NOT NaN-blank here: the original set interior velocities to 0.0,
-        # and downstream griddata/GP code expects finite numbers everywhere.
-        vel = self._solver.velocity(
-            grid_points, blank_interior=False, blank_near=False)
-        if zero_inside:
-            try:
-                inside = self.mesh.contains(grid_points)
-                vel[inside] = 0.0
-            except Exception:
-                pass
-        return vel
-
-    # convenience pass-throughs
-    def bc_residual(self):
-        return self._solver.bc_residual()
-
-    def net_source(self):
-        return self._solver.net_source()
 
 
 def auto_visualize(solver, savepath=None, show=False):
@@ -377,37 +345,36 @@ def validate_sphere(verbose=True):
               f"net source {s.net_source():.2e}  field err {err.mean():.3%}")
     return s
 
-
 def main():
-    stl = sys.argv[1] if len(sys.argv) > 1 else 'inputs/triangle.stl'
-    print("=== Validation: flow past a sphere ===")
-    s_sphere = validate_sphere()
+    stl = 'input_stls/triangle.stl'
+    # print("=== Validation: flow past a sphere ===")
+    # s_sphere = validate_sphere()
 
-    fig1, axs = plt.subplots(1, 2, figsize=(13, 5.5))
-    plot_slice(s_sphere, axis='z', frac=0.5, ax=axs[0],
-               title='Sphere: z=0 (fore-aft symmetric)')
-    U, rp = 10.0, 1.15
-    th = np.linspace(0.02, np.pi - 0.02, 200)
-    vr = U * np.cos(th) * (1 - 1 / rp**3); vt = -U * np.sin(th) * (1 + 1 / (2 * rp**3))
-    axs[1].plot(np.degrees(th), np.sqrt(vr**2 + vt**2), 'k-', lw=2, label='analytic')
-    c = s_sphere.centers
-    thc = np.arccos(np.clip(c[:, 0] / np.linalg.norm(c, axis=1), -1, 1))
-    probe = c / np.linalg.norm(c, axis=1, keepdims=True) * rp
-    spd = np.linalg.norm(s_sphere.velocity(probe, blank_interior=False,
-                                           blank_near=False), axis=1)
-    axs[1].scatter(np.degrees(thc), spd, s=8, c='tab:red', alpha=0.5, label='solver')
-    axs[1].set_xlabel('theta (deg)'); axs[1].set_ylabel('|v| at r=1.15')
-    axs[1].set_title('Sphere field speed vs analytic')
-    axs[1].legend(); axs[1].grid(alpha=0.3)
-    fig1.tight_layout(); fig1.savefig('fig_validation_sphere.png', dpi=110)
+    # fig1, axs = plt.subplots(1, 2, figsize=(13, 5.5))
+    # plot_slice(s_sphere, axis='z', frac=0.5, ax=axs,
+    #            title='Sphere: z=0 (fore-aft symmetric)')
+    # U, rp = 10.0, 1.15
+    # th = np.linspace(0.02, np.pi - 0.02, 200)
+    # vr = U * np.cos(th) * (1 - 1 / rp**3); vt = -U * np.sin(th) * (1 + 1 / (2 * rp**3))
+    # axs[1].plot(np.degrees(th), np.sqrt(vr**2 + vt**2), 'k-', lw=2, label='analytic')
+    # c = s_sphere.centers
+    # thc = np.arccos(np.clip(c[:, 0] / np.linalg.norm(c, axis=1), -1, 1))
+    # probe = c / np.linalg.norm(c, axis=1, keepdims=True) * rp
+    # spd = np.linalg.norm(s_sphere.velocity(probe, blank_interior=False,
+    #                                        blank_near=False), axis=1)
+    # axs[1].scatter(np.degrees(thc), spd, s=8, c='tab:red', alpha=0.5, label='solver')
+    # axs[1].set_xlabel('theta (deg)'); axs[1].set_ylabel('|v| at r=1.15')
+    # axs[1].set_title('Sphere field speed vs analytic')
+    # axs[1].legend(); axs[1].grid(alpha=0.3)
+    # fig1.tight_layout(); fig1.savefig('fig_validation_sphere.png', dpi=110)
 
     print(f"\n=== Arbitrary geometry: {stl} ===")
     solver = VortexSheetSolver(stl, [10.0, 0.0, 0.0])
     rel = solver.net_source() / (np.linalg.norm(solver.V_inf) * solver.mesh.area)
     print(f"  BC residual {solver.bc_residual():.2e}   "
           f"net source {solver.net_source():.2e}   (rel {rel:.2%})")
-    auto_visualize(solver, savepath='fig_geometry.png')
-    print("Saved fig_validation_sphere.png and fig_geometry.png")
+    auto_visualize(solver) #savepath='fig_geometry.png')
+    # print("Saved fig_validation_sphere.png and fig_geometry.png")
     plt.show()
 
 

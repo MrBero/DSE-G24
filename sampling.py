@@ -10,7 +10,7 @@ import os
 seed = 7
 rnd.seed(seed)
 
-def sample(field_path, stl_mesh, samples=None, method="CSV", epsilon=0.02, num_samples=2000):
+def sample(field_path, stl_mesh, bounds=None, samples=None, method="CSV", epsilon=0.02, num_samples=2000):
     ''' GROUND TRUTH SUBSAMPLING FUNCTION
     \nInputs
     \nfield_path -- path to the field data (csv) of the underlying CFD truth
@@ -26,12 +26,19 @@ def sample(field_path, stl_mesh, samples=None, method="CSV", epsilon=0.02, num_s
     source_coords = cfd_df[['x-coordinate', 'y-coordinate', 'z-coordinate']].values
     source_values = cfd_df[['x-velocity', 'y-velocity', 'z-velocity', 'pressure']].values
 
-    # Bounds of the domain; used later for random sampling and validity checks
-    x_min, x_max = source_coords[:, 0].min(), source_coords[:, 0].max()
-    y_min, y_max = source_coords[:, 1].min(), source_coords[:, 1].max()
-    z_min, z_max = source_coords[:, 2].min(), source_coords[:, 2].max()
 
-    bounds = np.array([[x_min, x_max],[y_min, y_max],[z_min, z_max]])
+
+    if bounds is not None:
+        x_min, x_max = bounds[0,0], bounds[0,1]
+        y_min, y_max = bounds[1,0], bounds[1,1]
+        z_min, z_max = bounds[2,0], bounds[2,1]
+    else:
+        # Bounds of the domain; used later for random sampling and validity checks
+        x_min, x_max = source_coords[:, 0].min(), source_coords[:, 0].max()
+        y_min, y_max = source_coords[:, 1].min(), source_coords[:, 1].max()
+        z_min, z_max = source_coords[:, 2].min(), source_coords[:, 2].max()
+    
+    data_bounds = np.array([[x_min, x_max],[y_min, y_max],[z_min, z_max]])
 
     # Load wall data and construct tree for optimized distance checking
     # wall_df = pd.read_csv(wall_path)
@@ -121,4 +128,4 @@ def sample(field_path, stl_mesh, samples=None, method="CSV", epsilon=0.02, num_s
         columns=columns
     )
         
-    return results_df, bounds
+    return results_df, data_bounds
