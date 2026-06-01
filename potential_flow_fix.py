@@ -6,7 +6,7 @@ import trimesh
 class PotentialFlowSolver():
     def __init__(self, V_inf, stl_mesh, n_vortices_per_tri=4):
         self.mesh = stl_mesh
-        self.mesh_centers = self.mesh.triangles_center
+        self.mesh_centers = self.mesh.triangles_center 
         self.mesh_normals = self.mesh.face_normals
         self.mesh_triangles = self.mesh.triangles  # (N_tri, 3, 3)
         self.V_inf = V_inf
@@ -163,24 +163,50 @@ class PotentialFlowSolver():
         # print(is_inside)
         vel[is_inside, :] = np.zeros(((is_inside).sum(), 3))
         # print(vel)
-
         return vel
+
+    def plot_slice(self, vel, slice):
+        vel_grid = vel.reshape(*x.shape, -1)
+        grid_grid = np.stack([x,y,z], axis=-1)
+        Xs, Ys = grid_grid[:,:,slice,0], grid_grid[:,:,slice,1]
+        us, vs, ws = vel_grid[:,:,slice,0], vel_grid[:,:,slice,1], vel_grid[:,:,slice,2]
+        mag = np.sqrt(us**2 + vs**2 + ws**2)
+
+        fig, ax2 = plt.subplots(figsize=(7, 6))
+        pc = ax2.contourf(Xs, Ys, mag, levels=30, cmap='viridis')
+        fig.colorbar(pc, ax=ax2, label='|velocity|')
+        ax2.scatter(*self.vortex_points[:,:2].T, c='black')
+        ax2.quiver(Xs, Ys, us, vs, color='white')
+        ax2.set_aspect('equal')
+        # ax2.set_title(f'xy slice at z={np.linspace(bounds[2,0],bounds[2,1],res)[k]:.2f}')
+
+    def plot_3D(self, vel):
+        grid = np.stack([x, y, z], axis=-1).reshape(-1, 3)
+        ax = plt.figure().add_subplot(projection='3d')
+        ax.scatter(*self.vortex_points.T, c='black')
+        ax.quiver(*grid.T, *vel.T, length = 1)
+        ax.set_aspect('equal')
+        # plt.show()
 
 
 if __name__ == "__main__":
-    res = 10
+    res = 40
     V_inf = np.array([10.0, 0.0, 0.0])
-    x, y, z = np.meshgrid(np.linspace(-2, 2, res),
-                           np.linspace(-2, 2, res),
-                           np.linspace(-2, 2, res),
-                           indexing='ij')
+    # x_dim = 15 * 1000 #must be in mm
+    # y_dim = 45 * 1000
+    # z_dim = 15 * 1000
 
-    potentialFlowSolve = PotentialFlowSolver(V_inf, 'inputs/sphere.stl',
-                                             n_vortices_per_tri=3)
+    # x_dim, y_dim, z_dim = (15000, 45000, 15000) #must be in mm
+    x_dim, y_dim, z_dim = (4, 5, 7)
+    x, y, z = np.meshgrid(np.linspace(-x_dim/2, x_dim/2, res),
+                          np.linspace(-y_dim/2, y_dim/2, res),
+                          np.linspace(0, z_dim, res),
+                           indexing='ij') 
+
+    stl_mesh = trimesh.load_mesh('inputs/triangle.stl')
+    stl_mesh.apply_scale(1/1000) #to m
+    potentialFlowSolve = PotentialFlowSolver(V_inf, stl_mesh,
+                                             n_vortices_per_tri=5)
     flowvel = potentialFlowSolve.generate_flow_field(x, y, z)
-
-    # grid = np.stack([x, y, z], axis=-1).reshape(-1, 3)
-
-    # ax = plt.figure().add_subplot(projection='3d')
-    # ax.quiver(*grid.T, *flowvel.T, length=0.1, normalize=True)
-    # plt.show()
+    potentialFlowSolve.plot_slice(flowvel, slice = x.shape[0] //2)
+    plt.show()

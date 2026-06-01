@@ -73,11 +73,11 @@ def fit_hyperparams(train_coords, train_vels, n_restarts=4, jitter=1e-6, seed=0)
     f, t, ok = best
     return {'ell': t[0:3], 'var': float(t[3]), 'noise': float(t[4]), 'nll': f, 'success': ok}
 
-stl_filepath = 'inputs/sphere.stl' #TODO this has to be updated to cylinder.stl of correct dimensions and position!!!
+stl_filepath = 'inputs/cylinder.stl' #TODO the cylinder right now does not have enough grid points
 stl_mesh = trimesh.load_mesh(stl_filepath) #cylinder: 2.75cm height, 6mm diameter centered at 3.2cm at the x, 1.2cm at the y
 #ground truth values or real world measurements; 'training' for GPR
-training_point_n = 10 #number of training points (drones)
-res = 5 #test points resolution
+training_point_n = 100 #number of training points (drones)
+res = 25 #test points resolution
 
 
 ground_truth, bounds = sample('inputs/Field.csv', stl_mesh, method='random', num_samples=training_point_n)
@@ -96,10 +96,11 @@ print(f"Total number of training points: {training_point_n}\nTotal number of tes
 
 tick = time.thread_time()
 V_inf = np.array([10, 0, 0]) #TODO this has to be updated to the inlet conditions of the cfd!!!
-potential_flow_solver = PotentialFlowSolver(V_inf, stl_mesh, n_vortices_per_tri=3)
+potential_flow_solver = PotentialFlowSolver(V_inf, stl_mesh, n_vortices_per_tri=1)
 
 print(test_points.shape)
 potential_flow_field = potential_flow_solver.generate_flow_field(x, y, z)  # keep as (N, 3), drop the .reshape(-1,1)
+plt.show()
 means_tests = potential_flow_field  # already (N, 3) matching test_points
 
 means_training = scipy.interpolate.griddata(
