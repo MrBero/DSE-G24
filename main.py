@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.style as mplstyle
 plt.style.use('dark_background')
 mplstyle.use('fast')
-
+from potential_flow_run import *
 import os
 os.environ['JAX_PLATFORMS'] = 'cpu' #if jax CUDA is installed, then we force cpu in this case. comment if gpu compute is preferred
 import time
@@ -16,7 +16,7 @@ import jax.scipy.optimize
 jax.config.update("jax_enable_x64", True)
 import trimesh
 
-from potential_flow_run import VortexSheetSolver, plot_slice
+from flowpanelwrapper import FLOWPanelSolver
 from sampling import sample
 
 def matern52_np(v1, v2, ell, var):
@@ -84,7 +84,7 @@ stl_mesh.apply_scale(1/1000) #from mm to m
 
 #ground truth values or real world measurements; 'training' for GPR
 training_point_n = 100 #number of training points (drones)
-res = 25 #test points resolution
+res = 15 #test points resolution
 
 
 # bounds = np.array([[-5,5],[-5,5],[0,10]])
@@ -107,8 +107,7 @@ print(f"Total number of training points: {training_point_n}\nTotal number of tes
 
 tick = time.thread_time()
 V_inf = np.array([10, 0, 0]) #TODO this has to be updated to the inlet conditions of the cfd!!!
-surface_source_solver = VortexSheetSolver(V_inf = V_inf, mesh = stl_mesh, 
-                                          auto_condition=True, target_edge_frac=0.06, max_panels=3000)
+surface_source_solver = FLOWPanelSolver(stl_mesh, V_inf)
 
 print(test_points.shape)
 potential_flow_field = surface_source_solver.generate_flow_field(x, y, z)  # keep as (N, 3), drop the .reshape(-1,1)
@@ -195,4 +194,4 @@ ax2.set_title(f'GPR xy slice at z={np.linspace(bounds[2,0],bounds[2,1],res)[k]:.
 plt.show()
 
 #TODO add in a GPR for the pressure field
-#TODO momentum integral code to calculate forces on the building
+#TODO momentum integral code to calculate forces on the building"--project=.",
