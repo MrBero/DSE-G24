@@ -242,8 +242,48 @@ def plot_slice(solver, axis='z', frac=0.5, n=160, pad_frac=0.8,
     ax.set_aspect('equal')
     ax.set_xlim(lo2[a0], hi2[a0]); ax.set_ylim(lo2[a1], hi2[a1])
     ax.set_title(title or f'{axis}={coord:.3g} slice')
-    return ax        # exposed for main.py's scatter plot
+    return ax
 
+
+# =========================================================================== #
+#  Backward-compatible wrapper for the original main.py interface              #
+# =========================================================================== #
+class PotentialFlowSolver:
+
+    def __init__(self, V_inf, stl_mesh, n_vortices_per_tri=1,
+                 auto_condition=True, verbose=True):
+        # NOTE: original signature is (V_inf, mesh, ...). Keep that order.
+        self._solver = VortexSheetSolver(
+            stl_mesh, V_inf, auto_condition=auto_condition, verbose=verbose)
+        self.V_inf = self._solver.V_inf
+        self.mesh = self._solver.mesh          # exposed for main.py's scatter plot
+        self.n = n_vortices_per_tri            # kept only for compatibility
+
+    def generate_flow_field(self, x, y, z, zero_inside=True):
+        """
+        Evaluate total velocity on a meshgrid.
+        x, y, z : arrays of identical shape (any meshgrid indexing)
+        returns : (N, 3) ordered like np.stack([x, y, z], -1).reshape(-1, 3)
+        """
+        grid_points = np.stack([x, y, z], axis=-1).reshape(-1, 3)
+        # Do NOT NaN-blank here: the original set interior velocities to 0.0,
+        # and downstream griddata/GP code expects finite numbers everywhere.
+        vel = self._solver.velocity(
+            grid_points, blank_interior=False, blank_near=False)
+        if zero_inside:
+            try:
+                inside = self.mesh.contains(grid_points)
+                vel[inside] = 0.0
+            except Exception:
+                pass
+        return vel
+
+    # convenience pass-throughs
+    def bc_residual(self):
+        return self._solver.bc_residual()
+
+    def net_source(self):
+        return self._solver.net_source()
 
 
 def auto_visualize(solver, savepath=None, show=False):
