@@ -1,39 +1,3 @@
-"""
-vortex_sheet_solver.py
-======================
-
-General potential-flow solver for an ARBITRARY closed body, written from
-scratch, with fully automatic mesh conditioning and post-processing.
-
-Formulation
------------
-For a closed, non-lifting body the divergence-free disturbance field that
-enforces no-penetration is a SURFACE SOURCE SHEET (a bound vortex sheet on a
-closed bluff body carries no net circulation and would need a Kutta condition
-to be unique -- it is the source distribution that turns the flow). We use a
-constant-strength source-panel method:
-
-    panel k carries source density sigma_k
-    velocity of a point source q at x0:  u = q (x-x0) / (4 pi |x-x0|^3)
-    no-penetration at every centroid i:  (V_inf + sum_k u_ik) . n_i = 0
-    -> linear system  A sigma = -(V_inf . n),  with exact self term +1/2.
-
-Panels are integrated with 4-point Gauss quadrature.
-
-Automatic handling for ANY geometry
-------------------------------------
-* Mesh conditioning (`condition_mesh`): merges duplicate vertices, fixes
-  winding/normals, and adaptively SUBDIVIDES any face longer than a target
-  edge length (a fraction of the body diagonal) so coarse inputs like a
-  324-panel prism are refined before solving. A hard panel cap keeps the dense
-  linear solve tractable.
-* Post-processing parameters (color clip, near-surface mask distance, slice
-  positions, domain padding) are all DERIVED FROM THE MESH, never hard-coded,
-  so plots are sensible for a 1-unit sphere or a 5000-unit tower alike.
-
-Run directly to validate on a sphere and visualise any STL passed as argv[1]
-(defaults to the uploaded triangle.stl).
-"""
 
 import sys
 import numpy as np
@@ -323,58 +287,18 @@ def auto_visualize(solver, savepath=None, show=False):
     return fig
 
 
-# =========================================================================== #
-#  Validation + demo                                                           #
-# =========================================================================== #
-def validate_sphere(verbose=True):
-    sph = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
-    U = 10.0
-    s = VortexSheetSolver(sph, [U, 0, 0], verbose=verbose)
-    rp = 1.15
-    c = s.centers
-    th = np.arccos(np.clip(c[:, 0] / np.linalg.norm(c, axis=1), -1, 1))
-    probe = c / np.linalg.norm(c, axis=1, keepdims=True) * rp
-    spd = np.linalg.norm(s.velocity(probe, blank_interior=False,
-                                    blank_near=False), axis=1)
-    vr = U * np.cos(th) * (1 - 1 / rp**3)
-    vt = -U * np.sin(th) * (1 + 1 / (2 * rp**3))
-    an = np.sqrt(vr**2 + vt**2)
-    err = np.abs(spd - an) / an
-    if verbose:
-        print(f"  SPHERE  BC residual {s.bc_residual():.2e}  "
-              f"net source {s.net_source():.2e}  field err {err.mean():.3%}")
-    return s
+
 
 def main():
-    stl = 'input_stls/triangle.stl'
-    # print("=== Validation: flow past a sphere ===")
-    # s_sphere = validate_sphere()
-
-    # fig1, axs = plt.subplots(1, 2, figsize=(13, 5.5))
-    # plot_slice(s_sphere, axis='z', frac=0.5, ax=axs,
-    #            title='Sphere: z=0 (fore-aft symmetric)')
-    # U, rp = 10.0, 1.15
-    # th = np.linspace(0.02, np.pi - 0.02, 200)
-    # vr = U * np.cos(th) * (1 - 1 / rp**3); vt = -U * np.sin(th) * (1 + 1 / (2 * rp**3))
-    # axs[1].plot(np.degrees(th), np.sqrt(vr**2 + vt**2), 'k-', lw=2, label='analytic')
-    # c = s_sphere.centers
-    # thc = np.arccos(np.clip(c[:, 0] / np.linalg.norm(c, axis=1), -1, 1))
-    # probe = c / np.linalg.norm(c, axis=1, keepdims=True) * rp
-    # spd = np.linalg.norm(s_sphere.velocity(probe, blank_interior=False,
-    #                                        blank_near=False), axis=1)
-    # axs[1].scatter(np.degrees(thc), spd, s=8, c='tab:red', alpha=0.5, label='solver')
-    # axs[1].set_xlabel('theta (deg)'); axs[1].set_ylabel('|v| at r=1.15')
-    # axs[1].set_title('Sphere field speed vs analytic')
-    # axs[1].legend(); axs[1].grid(alpha=0.3)
-    # fig1.tight_layout(); fig1.savefig('fig_validation_sphere.png', dpi=110)
+    stl = sys.argv[1] if len(sys.argv) > 1 else 'inputs/triangle.stl'
 
     print(f"\n=== Arbitrary geometry: {stl} ===")
     solver = VortexSheetSolver(stl, [10.0, 0.0, 0.0])
     rel = solver.net_source() / (np.linalg.norm(solver.V_inf) * solver.mesh.area)
     print(f"  BC residual {solver.bc_residual():.2e}   "
           f"net source {solver.net_source():.2e}   (rel {rel:.2%})")
-    auto_visualize(solver) #savepath='fig_geometry.png')
-    # print("Saved fig_validation_sphere.png and fig_geometry.png")
+    auto_visualize(solver, savepath='fig_geometry.png')
+    print("fig_geometry.png saved")
     plt.show()
 
 
