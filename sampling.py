@@ -2,8 +2,6 @@
 import numpy as np
 import numpy.random as rnd
 import scipy as sp
-import scipy.spatial
-import scipy.interpolate
 import pandas as pd
 
 seed = 7
