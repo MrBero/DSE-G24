@@ -56,7 +56,6 @@ def matern52_np(v1, v2, ell, var):
         + (5.0 / 3.0) * r ** 2
     ) * jnp.exp(-jnp.sqrt(5.0) * r)
 
-
 @jax.jit
 def Hemholtz_K0(V1, V2, ell, var):
     """
@@ -72,7 +71,6 @@ def Hemholtz_K0(V1, V2, ell, var):
             [H[2, 0], H[2, 1], -H[0, 0] - H[1, 1]],
         ]
     )
-
 
 def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
     """
@@ -109,11 +107,6 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
             result_matrix = result_matrix + jitter * jnp.eye(n_1 * 3)
 
     return result_matrix
-
-
-# =============================================================================
-# Fast, reasonably robust hyperparameter fitting
-# =============================================================================
 
 def fit_hyperparams(
     train_coords,
@@ -261,11 +254,6 @@ def fit_hyperparams(
         "ell_max": ell_max,
     }
 
-
-# =============================================================================
-# Diagnostics helpers
-# =============================================================================
-
 def print_vector_stats(name, arr):
     arr = np.asarray(arr)
 
@@ -285,16 +273,13 @@ def print_vector_stats(name, arr):
         print(f"mean:      {np.nanmean(arr)}")
         print(f"std:       {np.nanstd(arr)}")
 
-
 def rmse(a, b):
     a = np.asarray(a)
     b = np.asarray(b)
     return float(np.sqrt(np.mean((a - b) ** 2)))
 
-
 def velocity_magnitude(U):
     return np.sqrt(np.sum(U ** 2, axis=-1))
-
 
 def interpolate_cfd_velocity_to_points(cfd_filepath, query_points):
     cfd_df = pd.read_csv(cfd_filepath)
@@ -317,11 +302,6 @@ def interpolate_cfd_velocity_to_points(cfd_filepath, query_points):
     )
 
     return cfd_query_vels
-
-
-# =============================================================================
-# Batched posterior mean (memory-safe k_star application)
-# =============================================================================
 
 def posterior_mean_batched(
     test_points,
@@ -362,11 +342,6 @@ def posterior_mean_batched(
             print(f"  posterior chunk {ci + 1}/{n_chunks}", flush=True)
 
     return out.reshape(-1, 1)
-
-
-# =============================================================================
-# Main
-# =============================================================================
 
 def main():
     # -------------------------------------------------------------------------
@@ -522,10 +497,9 @@ def main():
     means_training = means_training_matrix.reshape(-1, 1)
 
     tock = time.perf_counter()
-    print(f"\nPrior means calculated in: {tock - tick:.3f}s")
+    print(f"\nPrior means (julia script) calculated in: {tock - tick:.3f}s")
 
-    print_vector_stats("potential_flow_field / means_tests", means_tests)
-    print_vector_stats("means_training_matrix", means_training_matrix)
+    print_vector_stats("means_training", means_training)
 
     prior_train_rmse = rmse(means_training, training_vels)
     data_rms = float(np.sqrt(np.mean(training_vels ** 2)))
@@ -535,19 +509,6 @@ def main():
     print(f"Prior RMSE:          {prior_train_rmse:.6g}")
     print(f"Training data RMS:   {data_rms:.6g}")
     print(f"Relative prior RMSE: {prior_train_rmse / max(data_rms, 1e-12):.6g}")
-
-    # Optional old prior plot.
-    try:
-        fig_pot, ax_pot = plt.subplots(figsize=(7, 6))
-        plot_slice(
-            surface_source_solver,
-            axis="z",
-            frac=z_slice_target / max(stl_mesh.bounds[1, 2], 1e-12),
-            ax=ax_pot,
-            title="Potential flow field around object",
-        )
-    except Exception as exc:
-        print(f"Skipping plot_slice because it failed: {exc}")
 
     # -------------------------------------------------------------------------
     # Fit GP to residuals
@@ -559,7 +520,7 @@ def main():
             f"NaNs in residuals_for_fit: {np.isnan(residuals_for_fit).sum()}"
         )
 
-    print_vector_stats("residuals_for_fit", residuals_for_fit.reshape(-1, 3))
+    print_vector_stats("residuals_for_fit", residuals_for_fit)
 
     tick = time.perf_counter()
     fit = fit_hyperparams(
@@ -572,7 +533,7 @@ def main():
     tock = time.perf_counter()
 
     print(f"\nHyperparameter fitting complete in {tock - tick:.3f}s")
-    print(f"fit: {fit}")
+    # print(f"fit: {fit}")
 
     ell = jnp.asarray(fit["ell"])
     var = float(fit["var"])
@@ -580,7 +541,7 @@ def main():
 
     dx_test = (bounds[:, 1] - bounds[:, 0]) / (res - 1)
 
-    print("\nLengthscale sanity check")
+    print("\nLengthscales")
     print("------------------------")
     print(f"Test grid spacing: {dx_test}")
     print(f"Fitted ell:        {fit['ell']}")
@@ -591,44 +552,18 @@ def main():
     # Assemble training covariance and solve for alpha
     # -------------------------------------------------------------------------
     tick = time.perf_counter()
-    K_matrix = assemble_dat_shi(
-        training_coords, training_coords, ell, var,
-        noise_std=noise, jitter=1e-8,
-    )
+    K_matrix = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=noise, jitter=1e-8)
     tock = time.perf_counter()
 
     print(f"\nK_matrix assembled in {tock - tick:.3f}s")
     print(f"K_matrix shape: {K_matrix.shape}")
 
-    try:
-        eigvals = np.linalg.eigvalsh(np.array(K_matrix))
-        eig_min = eigvals.min()
-        eig_max = eigvals.max()
-        cond = eig_max / max(eig_min, 1e-300)
-
-        print("\nK_matrix eig diagnostics")
-        print("------------------------")
-        print(f"eig min: {eig_min:.6g}")
-        print(f"eig max: {eig_max:.6g}")
-        print(f"cond:    {cond:.6g}")
-    except Exception as exc:
-        print(f"Skipping eigenvalue diagnostics because they failed: {exc}")
-
     residuals = jnp.asarray(training_vels - means_training).reshape(-1, 1)
-
     c, low = cho_factor(K_matrix)
     alpha = cho_solve((c, low), residuals)
 
-    # -------------------------------------------------------------------------
-    # Posterior solve (streamed over test points to bound memory)
-    # -------------------------------------------------------------------------
     tick = time.perf_counter()
-
-    GPR_posterior = posterior_mean_batched(
-        test_points, training_coords, ell, var, alpha, means_tests,
-        batch=posterior_batch,
-    )
-
+    GPR_posterior = posterior_mean_batched(test_points, training_coords, ell, var, alpha, means_tests, batch=posterior_batch)
     tock = time.perf_counter()
 
     print(f"\nGPR posterior generated in {tock - tick:.3f}s")
@@ -636,16 +571,10 @@ def main():
 
     GPR_posterior_reshaped = np.array(GPR_posterior).reshape(-1, 3)
 
-    # -------------------------------------------------------------------------
-    # Training reconstruction sanity check
-    # -------------------------------------------------------------------------
     print("\nTraining reconstruction check")
     print("-----------------------------")
 
-    K_train_signal = assemble_dat_shi(
-        training_coords, training_coords, ell, var,
-        noise_std=0.0, jitter=0.0,
-    )
+    K_train_signal = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=0.0, jitter=0.0)
 
     train_posterior = jnp.asarray(means_training) + K_train_signal @ alpha
 
@@ -657,9 +586,6 @@ def main():
     print(f"Fitted var:           {fit['var']:.6g}")
     print(f"Fitted noise:         {fit['noise']:.6g}")
 
-    # -------------------------------------------------------------------------
-    # Compare prior/posterior to CFD on test grid
-    # -------------------------------------------------------------------------
     print("\nInterpolating CFD truth onto test grid...")
     cfd_test_vels = interpolate_cfd_velocity_to_points(cfd_filepath, test_points)
 
@@ -681,10 +607,7 @@ def main():
     print(f"Truth test RMS:               {truth_test_rms:.6g}")
     print(f"Relative prior test RMSE:     {prior_test_rmse / max(truth_test_rms, 1e-12):.6g}")
     print(f"Relative posterior test RMSE: {post_test_rmse / max(truth_test_rms, 1e-12):.6g}")
-
-    # -------------------------------------------------------------------------
-    # 3D scatter plot
-    # -------------------------------------------------------------------------
+    
     GPR_vel_mags = np.sqrt(np.sum(GPR_posterior_reshaped ** 2, axis=1))
 
     print_vector_stats("GPR_posterior_reshaped", GPR_posterior_reshaped)
@@ -693,33 +616,16 @@ def main():
     fig1 = plt.figure(figsize=(9, 7))
     ax1 = fig1.add_subplot(projection="3d")
 
-    sc = ax1.scatter3D(
-        test_points[:, 0],
-        test_points[:, 1],
-        test_points[:, 2],
-        c=GPR_vel_mags,
-        alpha=0.2,
-        s=4,
-    )
+    sc = ax1.scatter3D(test_points[:, 0], test_points[:, 1], test_points[:, 2], c=GPR_vel_mags, alpha=0.2, s=4)
 
     fig1.colorbar(sc, ax=ax1, label="|velocity|")
 
     verts = surface_source_solver.mesh.vertices
 
-    ax1.scatter3D(
-        verts[:, 0], verts[:, 1], verts[:, 2], c="black", s=4,
-    )
+    ax1.scatter3D(verts[:, 0], verts[:, 1], verts[:, 2], c="black", s=4)
 
     # Overlay actual training sample locations.
-    ax1.scatter3D(
-        training_coords[:, 0],
-        training_coords[:, 1],
-        training_coords[:, 2],
-        c="red",
-        s=18,
-        depthshade=False,
-        label="training samples",
-    )
+    ax1.scatter3D(training_coords[:, 0], training_coords[:, 1], training_coords[:, 2], c="red", s=18, depthshade=False, label="training samples")
     ax1.legend()
 
     ax1.set_title("GPR posterior velocity magnitude")
@@ -728,9 +634,6 @@ def main():
     ax1.set_zlabel("z")
     ax1.set_aspect("equal")
 
-    # -------------------------------------------------------------------------
-    # Reshape fields
-    # -------------------------------------------------------------------------
     P = test_points.reshape(res, res, res, 3)
 
     prior_U = means_tests.reshape(res, res, res, 3)
@@ -768,67 +671,6 @@ def main():
     near_slice = np.abs(verts[:, 2] - z_here) <= slice_tol
 
     print(f"Mesh vertices near slice: {near_slice.sum()} / {len(verts)}")
-
-    # -------------------------------------------------------------------------
-    # Simple posterior slice
-    # -------------------------------------------------------------------------
-    fig2, ax2 = plt.subplots(figsize=(7, 6))
-
-    pc = ax2.contourf(Xs, Ys, post_mag, levels=30, cmap="viridis")
-    fig2.colorbar(pc, ax=ax2, label="|velocity|")
-
-    if near_slice.any():
-        ax2.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
-    else:
-        print(f"No mesh vertices near z={z_here:.4g}; not drawing object on simple slice.")
-
-    skip = max(res // 20, 1)
-
-    ax2.quiver(
-        Xs[::skip, ::skip],
-        Ys[::skip, ::skip],
-        post_us[::skip, ::skip],
-        post_vs[::skip, ::skip],
-        color="white",
-        scale=None,
-    )
-
-    ax2.set_aspect("equal")
-    ax2.set_title(f"GPR posterior xy slice at z={z_here:.4g}")
-    ax2.set_xlabel("x")
-    ax2.set_ylabel("y")
-
-    # -------------------------------------------------------------------------
-    # Prior vs posterior same slice
-    # -------------------------------------------------------------------------
-    fig_compare, axs = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
-
-    vmin = np.nanmin([prior_mag, post_mag])
-    vmax = np.nanmax([prior_mag, post_mag])
-
-    fields = [
-        (prior_mag, "Prior |u|", "viridis", vmin, vmax),
-        (post_mag, "Posterior |u|", "viridis", vmin, vmax),
-        (post_mag - prior_mag, "Posterior - Prior |u|", "coolwarm", None, None),
-    ]
-
-    diff_lim = np.nanmax(np.abs(post_mag - prior_mag))
-
-    for ax, (field, title, cmap, lo, hi) in zip(axs, fields):
-        if title.startswith("Posterior - Prior"):
-            lo = -diff_lim
-            hi = diff_lim
-
-        pc = ax.contourf(Xs, Ys, field, levels=30, cmap=cmap, vmin=lo, vmax=hi)
-        fig_compare.colorbar(pc, ax=ax)
-
-        if near_slice.any():
-            ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
-
-        ax.set_aspect("equal")
-        ax.set_title(f"{title}, z={z_here:.4g}")
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
 
     # -------------------------------------------------------------------------
     # CFD vs prior vs posterior
@@ -869,43 +711,7 @@ def main():
         ax.set_title(f"{title}, z={z_here:.4g}")
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-
-    # -------------------------------------------------------------------------
-    # Vector comparison slice
-    # -------------------------------------------------------------------------
-    fig_vec, axs_vec = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
-
-    vec_items = [
-        (axs_vec[0], cfd_mag, cfd_us, cfd_vs, "CFD truth"),
-        (axs_vec[1], prior_mag, prior_us, prior_vs, "Prior"),
-        (axs_vec[2], post_mag, post_us, post_vs, "Posterior"),
-    ]
-
-    for ax, mag, uu, vv, title in vec_items:
-        pc = ax.contourf(
-            Xs, Ys, mag, levels=30, cmap="viridis", vmin=mag_vmin, vmax=mag_vmax,
-        )
-        fig_vec.colorbar(pc, ax=ax)
-
-        ax.quiver(
-            Xs[::skip, ::skip],
-            Ys[::skip, ::skip],
-            uu[::skip, ::skip],
-            vv[::skip, ::skip],
-            color="white",
-            scale=None,
-        )
-
-        if near_slice.any():
-            ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
-
-        ax.set_aspect("equal")
-        ax.set_title(f"{title}, z={z_here:.4g}")
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-
     plt.show()
-
 
 if __name__ == "__main__":
     main() 
