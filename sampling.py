@@ -100,7 +100,7 @@ def _cylinder_wall_points(
     rng,
     cylinder_radius=None,
     z_min=0.0,
-    z_max=7.5,
+    z_max=10,
     oversample=6,
 ):
     """

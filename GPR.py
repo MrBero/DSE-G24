@@ -221,7 +221,7 @@ def run_gpr(
     stl_filepath="input_stls/triangle.stl",
     cfd_filepath="inputs/FLTG.csv",
     stl_scale=1.0 / 1000.0,
-    training_point_n_requested=80,
+    training_point_n_requested=160,
     res=150,
     posterior_batch=4000,
     v_inf=(12.0, 0.0, 0.0),
