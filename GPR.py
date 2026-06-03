@@ -84,32 +84,30 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
 # Hyperparam fitting, the fun stuff
 def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, seed=0):
     """
-    Maximum marginal likelihood fit of GP hyperparameters
-    [ell_x, ell_y, ell_z, var, noise] via multi-start L-BFGS-B
-    over a Latin-hypercube design in log space.
+    Maximum marginal likelihood fit of GP hyperparameters without physical heuristics.
+    Uses wide, generic log-space bounds [-11.5, 11.5] for all parameters.
     """
     X = jnp.asarray(train_coords)
     y = jnp.asarray(train_residuals).reshape(-1, 1)
     n = X.shape[0]
 
-    span = np.maximum(np.ptp(train_coords, axis=0), 1e-12)
-    spacing = float((np.prod(span) / max(n, 1)) ** (1 / 3))
-    yvar = max(float(np.var(train_residuals)), 1e-12)
-    yrms = max(float(np.sqrt(np.mean(train_residuals ** 2))), 1e-12)
-
-    ell_min = np.full(3, max(spacing / 3.0, 0.25))
-    lo = np.log([*ell_min, yvar * 1e-6, yrms * 1e-4])
-    hi = np.log([*(3.0 * span), yvar * 1e3, yrms * 2.0])
+    lo = np.full(5, np.log(1e-5))
+    hi = np.full(5, np.log(1e5))
 
     @jax.jit
     def nll(log_theta):
-        ell, var, noise = jnp.exp(log_theta[:3]), jnp.exp(log_theta[3]), jnp.exp(log_theta[4])
+        ell = jnp.exp(log_theta[:3])
+        var = jnp.exp(log_theta[3])
+        noise = jnp.exp(log_theta[4])
+        
         blocks = jax.vmap(lambda a: jax.vmap(lambda b: Hemholtz_K0(a, b, ell, var))(X))(X)
         K = jnp.transpose(blocks, (0, 2, 1, 3)).reshape(3 * n, 3 * n)
         K += (noise ** 2 + jitter) * jnp.eye(3 * n)
+        
         c, low = cho_factor(K)
         alpha = cho_solve((c, low), y)
         logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(c)))
+        
         return 0.5 * (y.T @ alpha)[0, 0] + 0.5 * logdet + 0.5 * (3 * n) * jnp.log(2 * jnp.pi)
 
     nll_vg = jax.jit(jax.value_and_grad(nll))
@@ -118,18 +116,31 @@ def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, se
         val, grad = nll_vg(jnp.asarray(log_theta))
         return float(val), np.asarray(grad, dtype=float)
 
+    # 2. Latin Hypercube is maintained, but now stretches across the massive generic box
     starts = lo + qmc.LatinHypercube(d=5, seed=seed).random(n_restarts) * (hi - lo)
 
     best = None
     for t0 in starts:
-        res = spo.minimize(objective, t0, method="L-BFGS-B", jac=True,
-                           bounds=list(zip(lo, hi)), options={"maxiter": 200})
-        if best is None or res.fun < best.fun:
-            best = res
+        try:
+            res = spo.minimize(
+                objective, t0, method="L-BFGS-B", jac=True,
+                bounds=list(zip(lo, hi)), options={"maxiter": 200}
+            )
+            if best is None or res.fun < best.fun:
+                best = res
+        except Exception as e:
+            # Without heuristics, bad starts may cause Cholesky to fail. 
+            # We must catch the error so it doesn't kill the other restarts.
+            print(f"    [!] Restart failed (likely Singular Matrix): {e}")
+
+    if best is None:
+        raise RuntimeError("All optimizer restarts crashed. The math broke.")
 
     theta = np.exp(best.x)
+    
+    # Returning a dummy 'sample_spacing' of 0.0 since we deleted the real calculation
     return {"ell": theta[:3], "var": float(theta[3]), "noise": float(theta[4]),
-            "sample_spacing": spacing, "nll": float(best.fun)}
+            "sample_spacing": 0.0, "nll": float(best.fun)}
 
 
 def posterior_mean_batched(test_points, training_coords, ell, var, alpha, means_tests,
