@@ -1,7 +1,10 @@
 # DSE-G24
+
 Large-scale Aerodynamic Wake Survey
 
-To install julia packages:
-1. press square bracket 
+To install julia packages related to our project:
 
-2. add FLOWPanel, Meshes, GeoIO, NPZ
+```
+cd TO_PROJECT_DIRECTORY
+julia --project=. -e "import Pkg; Pkg.resolve(); Pkg.instantiate()"
+```
