@@ -10,49 +10,76 @@ def _velocity_magnitude(U):
     return np.sqrt(np.sum(U ** 2, axis=-1))
 
 
-def plot_posterior_3d(result):
-    """3D scatter of posterior velocity magnitude with mesh + training points."""
-    test_points = result["test_points"]
-    GPR_posterior = result["GPR_posterior"]
-    verts = result["mesh_vertices"]
-    training_coords = result["training_coords"]
+def plot_posterior_3d(result, max_field_points=6000, field_alpha=0.06):
+    """3D scatter of posterior velocity magnitude.
+
+    Lag fixes:
+      - Subsample the dense test-point cloud (the main bottleneck).
+      - Drop the per-vertex black mesh cloud (huge, occludes everything).
+      - Render the field cloud with very low alpha so the red training
+        points stay readable, and draw them LAST with depthshade off.
+    """
+    test_points = np.asarray(result["test_points"])
+    GPR_posterior = np.asarray(result["GPR_posterior"])
+    training_coords = np.asarray(result["training_coords"])
 
     vel_mags = _velocity_magnitude(GPR_posterior)
+
+    # ---- subsample the background field for responsiveness ----
+    n = test_points.shape[0]
+    if n > max_field_points:
+        idx = np.random.default_rng(0).choice(n, max_field_points, replace=False)
+        tp = test_points[idx]
+        vm = vel_mags[idx]
+    else:
+        tp = test_points
+        vm = vel_mags
 
     fig = plt.figure(figsize=(9, 7))
     ax = fig.add_subplot(projection="3d")
 
-    sc = ax.scatter3D(test_points[:, 0], test_points[:, 1], test_points[:, 2],
-                      c=vel_mags, alpha=0.2, s=4)
+    # faint translucent field so reds pop through
+    sc = ax.scatter3D(
+        tp[:, 0], tp[:, 1], tp[:, 2],
+        c=vm, cmap="viridis", alpha=field_alpha, s=3,
+        edgecolors="none", rasterized=True,
+    )
     fig.colorbar(sc, ax=ax, label="|velocity|")
 
-    ax.scatter3D(verts[:, 0], verts[:, 1], verts[:, 2], c="black", s=4)
-    ax.scatter3D(training_coords[:, 0], training_coords[:, 1], training_coords[:, 2],
-                 c="red", s=18, depthshade=False, label="training samples")
-    ax.legend()
+    # training samples drawn last, opaque, large, no depth fading
+    ax.scatter3D(
+        training_coords[:, 0], training_coords[:, 1], training_coords[:, 2],
+        c="red", s=60, depthshade=False, edgecolors="white", linewidths=0.6,
+        label="training samples", zorder=10,
+    )
+    ax.legend(loc="upper right")
 
     ax.set_title("GPR posterior velocity magnitude")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
-    ax.set_aspect("equal")
+    ax.set_box_aspect((1, 1, 1))
     return fig
+
+
+def _slice_index(z_grid, target):
+    return int(np.argmin(np.abs(z_grid - target)))
 
 
 def plot_slice_comparison(result, z_slice_target=2.5):
     """2x3 panel of CFD / prior / posterior |u| and their differences at a z-slice."""
     res = result["res"]
     bounds = result["bounds"]
-    test_points = result["test_points"]
-    verts = result["mesh_vertices"]
+    test_points = np.asarray(result["test_points"])
+    verts = np.asarray(result["mesh_vertices"])
 
     P = test_points.reshape(res, res, res, 3)
-    prior_U = result["means_tests"].reshape(res, res, res, 3)
-    post_U = result["GPR_posterior"].reshape(res, res, res, 3)
-    cfd_U = result["cfd_test_vels"].reshape(res, res, res, 3)
+    prior_U = np.asarray(result["means_tests"]).reshape(res, res, res, 3)
+    post_U = np.asarray(result["GPR_posterior"]).reshape(res, res, res, 3)
+    cfd_U = np.asarray(result["cfd_test_vels"]).reshape(res, res, res, 3)
 
     z_grid = np.linspace(bounds[2, 0], bounds[2, 1], res)
-    k = int(np.argmin(np.abs(z_grid - z_slice_target)))
+    k = _slice_index(z_grid, z_slice_target)
     z_here = z_grid[k]
 
     Xs = P[:, :, k, 0]
@@ -70,22 +97,26 @@ def plot_slice_comparison(result, z_slice_target=2.5):
 
     fig, axs = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
 
-    mag_vmin = np.nanmin([cfd_mag, prior_mag, post_mag])
-    mag_vmax = np.nanmax([cfd_mag, prior_mag, post_mag])
-    err_lim = np.nanmax(np.abs([prior_err, post_err]))
-    pp_lim = np.nanmax(np.abs(post_mag - prior_mag))
+    mag_vmin = float(np.nanmin([cfd_mag, prior_mag, post_mag]))
+    mag_vmax = float(np.nanmax([cfd_mag, prior_mag, post_mag]))
+    err_lim = float(np.nanmax(np.abs([prior_err, post_err])))
+    pp_lim = float(np.nanmax(np.abs(post_mag - prior_mag)))
+
+    mag_levels = np.linspace(mag_vmin, mag_vmax, 30)
+    err_levels = np.linspace(-err_lim, err_lim, 30)
+    pp_levels = np.linspace(-pp_lim, pp_lim, 30)
 
     plot_items = [
-        (axs[0, 0], cfd_mag, "CFD truth |u|", "viridis", mag_vmin, mag_vmax),
-        (axs[0, 1], prior_mag, "Prior |u|", "viridis", mag_vmin, mag_vmax),
-        (axs[0, 2], post_mag, "Posterior |u|", "viridis", mag_vmin, mag_vmax),
-        (axs[1, 0], post_mag - prior_mag, "Posterior - Prior |u|", "coolwarm", -pp_lim, pp_lim),
-        (axs[1, 1], prior_err, "Prior - CFD |u|", "coolwarm", -err_lim, err_lim),
-        (axs[1, 2], post_err, "Posterior - CFD |u|", "coolwarm", -err_lim, err_lim),
+        (axs[0, 0], cfd_mag, "CFD truth |u|", "viridis", mag_levels),
+        (axs[0, 1], prior_mag, "Prior |u|", "viridis", mag_levels),
+        (axs[0, 2], post_mag, "Posterior |u|", "viridis", mag_levels),
+        (axs[1, 0], post_mag - prior_mag, "Posterior - Prior |u|", "coolwarm", pp_levels),
+        (axs[1, 1], prior_err, "Prior - CFD |u|", "coolwarm", err_levels),
+        (axs[1, 2], post_err, "Posterior - CFD |u|", "coolwarm", err_levels),
     ]
 
-    for ax, field, title, cmap, lo, hi in plot_items:
-        pc = ax.contourf(Xs, Ys, field, levels=30, cmap=cmap, vmin=lo, vmax=hi)
+    for ax, field, title, cmap, levels in plot_items:
+        pc = ax.contourf(Xs, Ys, field, levels=levels, cmap=cmap, extend="both")
         fig.colorbar(pc, ax=ax)
         if near_slice.any():
             ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
@@ -97,6 +128,64 @@ def plot_slice_comparison(result, z_slice_target=2.5):
     return fig
 
 
+def plot_multi_slices(result, n_slices=5, field="posterior", axis="z"):
+    """Grid of |u| slices across several planes along the chosen axis.
+
+    field: "posterior", "prior", or "cfd"
+    axis:  "x", "y", or "z"
+    """
+    res = result["res"]
+    bounds = result["bounds"]
+    test_points = np.asarray(result["test_points"])
+
+    P = test_points.reshape(res, res, res, 3)
+    field_map = {
+        "posterior": "GPR_posterior",
+        "prior": "means_tests",
+        "cfd": "cfd_test_vels",
+    }
+    U = np.asarray(result[field_map[field]]).reshape(res, res, res, 3)
+    mag = _velocity_magnitude(U)
+
+    ax_idx = {"x": 0, "y": 1, "z": 2}[axis]
+    grid = np.linspace(bounds[ax_idx, 0], bounds[ax_idx, 1], res)
+    ks = np.unique(np.linspace(0, res - 1, n_slices).round().astype(int))
+
+    vmin, vmax = float(np.nanmin(mag)), float(np.nanmax(mag))
+    levels = np.linspace(vmin, vmax, 30)
+
+    ncols = min(len(ks), 5)
+    nrows = int(np.ceil(len(ks) / ncols))
+    fig, axs = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 4 * nrows),
+                            constrained_layout=True, squeeze=False)
+
+    other = [a for a in (0, 1, 2) if a != ax_idx]
+    labels = ["x", "y", "z"]
+
+    pc = None
+    for i, k in enumerate(ks):
+        ax = axs[i // ncols][i % ncols]
+        if axis == "z":
+            A, B, fld = P[:, :, k, other[0]], P[:, :, k, other[1]], mag[:, :, k]
+        elif axis == "y":
+            A, B, fld = P[:, k, :, other[0]], P[:, k, :, other[1]], mag[:, k, :]
+        else:
+            A, B, fld = P[k, :, :, other[0]], P[k, :, :, other[1]], mag[k, :, :]
+        pc = ax.contourf(A, B, fld, levels=levels, cmap="viridis", extend="both")
+        ax.set_aspect("equal")
+        ax.set_title(f"{axis}={grid[k]:.3g}")
+        ax.set_xlabel(labels[other[0]])
+        ax.set_ylabel(labels[other[1]])
+
+    for j in range(len(ks), nrows * ncols):
+        axs[j // ncols][j % ncols].axis("off")
+
+    if pc is not None:
+        fig.colorbar(pc, ax=axs, label=f"|u| ({field})", shrink=0.8)
+    fig.suptitle(f"{field} |u| slices along {axis}")
+    return fig
+
+
 def plot_pressure_slice(result, z_slice_target=2.5):
     """Posterior pressure field at a z-slice (only if pressure was fitted)."""
     if result.get("pressure_posterior") is None:
@@ -104,14 +193,14 @@ def plot_pressure_slice(result, z_slice_target=2.5):
 
     res = result["res"]
     bounds = result["bounds"]
-    test_points = result["test_points"]
-    verts = result["mesh_vertices"]
+    test_points = np.asarray(result["test_points"])
+    verts = np.asarray(result["mesh_vertices"])
 
     P = test_points.reshape(res, res, res, 3)
-    press = result["pressure_posterior"].reshape(res, res, res)
+    press = np.asarray(result["pressure_posterior"]).reshape(res, res, res)
 
     z_grid = np.linspace(bounds[2, 0], bounds[2, 1], res)
-    k = int(np.argmin(np.abs(z_grid - z_slice_target)))
+    k = _slice_index(z_grid, z_slice_target)
     z_here = z_grid[k]
 
     Xs = P[:, :, k, 0]
@@ -133,11 +222,12 @@ def plot_pressure_slice(result, z_slice_target=2.5):
     return fig
 
 
-def plot_all(result, z_slice_target=2.5, show=True):
+def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
     """Convenience: produce every figure."""
     figs = [
         plot_posterior_3d(result),
         plot_slice_comparison(result, z_slice_target),
+        plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z"),
     ]
     pf = plot_pressure_slice(result, z_slice_target)
     if pf is not None:

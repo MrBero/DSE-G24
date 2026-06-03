@@ -277,10 +277,9 @@ def run_gpr(
         # --- Sample training data ---
         with _stage("sample training data", verbose):
             ground_truth, bounds = sample(
-                cfd_filepath, stl_mesh, method="cv",
-                num_samples=training_point_n_requested, epsilon=0.02,
-                use_signed_distance=True, max_points=training_point_n_requested,
-                prior_fn=prior_fn,
+            cfd_filepath, stl_mesh, method="drone_array",
+            epsilon=0.02, use_signed_distance=True,
+            drone_array_config={"tilt_deg": 30, "n_rows": 10, "n_cols": 10},
             )
 
         bar.text('Training points...')
