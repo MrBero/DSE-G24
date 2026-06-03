@@ -12,6 +12,7 @@ def main():
         v_inf=(12.0, 0.0, 0.0),
         n_restarts=6,
         fit_pressure=True,
+        verbose=False
     )
 
     plot_all(result, z_slice_target=2.5, show=True)
