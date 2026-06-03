@@ -1,0 +1,362 @@
+import os
+
+# Force CPU before importing JAX.
+os.environ["JAX_PLATFORMS"] = "cpu"
+
+import numpy as np
+import scipy.interpolate
+import scipy.optimize as spo
+import scipy.stats.qmc as qmc
+import pandas as pd
+
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern, ConstantKernel, WhiteKernel
+
+import trimesh
+
+import jax
+import jax.numpy as jnp
+from jax.scipy.linalg import cho_factor, cho_solve
+
+jax.config.update("jax_enable_x64", True)
+
+from potential_flow_run import *
+from flowpanelwrapper import FLOWPanelSolver
+from sampling import sample
+
+
+# =============================================================================
+# Kernel
+# =============================================================================
+
+def matern52_np(v1, v2, ell, var):
+    """Scalar Matérn-5/2 covariance. v1,v2:(3,)  ell:(3,)  var:scalar."""
+    diff = v2 - v1
+    r = jnp.sqrt(
+        (diff[0] / ell[0]) ** 2
+        + (diff[1] / ell[1]) ** 2
+        + (diff[2] / ell[2]) ** 2
+        + 1e-8
+    )
+    return var * (1.0 + jnp.sqrt(5.0) * r + (5.0 / 3.0) * r ** 2) * jnp.exp(-jnp.sqrt(5.0) * r)
+
+
+@jax.jit
+def Hemholtz_K0(V1, V2, ell, var):
+    """3x3 divergence-free vector kernel block from Hessian of scalar Matérn-5/2."""
+    H = jax.hessian(matern52_np)(V1, V2, ell, var)
+    return jnp.array(
+        [
+            [-H[1, 1] - H[2, 2], H[0, 1], H[0, 2]],
+            [H[1, 0], -H[2, 2] - H[0, 0], H[1, 2]],
+            [H[2, 0], H[2, 1], -H[0, 0] - H[1, 1]],
+        ]
+    )
+
+
+def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
+    """
+    Block vector-valued covariance, point-major ordering:
+        [u_x(p0), u_y(p0), u_z(p0), u_x(p1), ...]
+    Returns (3*len(points_1), 3*len(points_2)).
+    """
+    points_1 = jnp.asarray(points_1)
+    points_2 = jnp.asarray(points_2)
+    n_1 = points_1.shape[0]
+    n_2 = points_2.shape[0]
+
+    blocks = jax.vmap(
+        lambda a: jax.vmap(lambda b: Hemholtz_K0(a, b, ell, var))(points_2)
+    )(points_1)
+
+    result_matrix = jnp.transpose(blocks, (0, 2, 1, 3)).reshape(n_1 * 3, n_2 * 3)
+
+    if n_1 == n_2:
+        if noise_std > 0.0:
+            result_matrix = result_matrix + (noise_std ** 2 + jitter) * jnp.eye(n_1 * 3)
+        elif jitter > 0.0:
+            result_matrix = result_matrix + jitter * jnp.eye(n_1 * 3)
+
+    return result_matrix
+
+
+def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, seed=0):
+    """
+    Maximum marginal likelihood fit of GP hyperparameters
+    [ell_x, ell_y, ell_z, var, noise] via multi-start L-BFGS-B
+    over a Latin-hypercube design in log space.
+    """
+    X = jnp.asarray(train_coords)
+    y = jnp.asarray(train_residuals).reshape(-1, 1)
+    n = X.shape[0]
+
+    span = np.maximum(np.ptp(train_coords, axis=0), 1e-12)
+    spacing = float((np.prod(span) / max(n, 1)) ** (1 / 3))
+    yvar = max(float(np.var(train_residuals)), 1e-12)
+    yrms = max(float(np.sqrt(np.mean(train_residuals ** 2))), 1e-12)
+
+    ell_min = np.full(3, max(spacing / 3.0, 0.25))
+    lo = np.log([*ell_min, yvar * 1e-6, yrms * 1e-4])
+    hi = np.log([*(3.0 * span), yvar * 1e3, yrms * 2.0])
+
+    @jax.jit
+    def nll(log_theta):
+        ell, var, noise = jnp.exp(log_theta[:3]), jnp.exp(log_theta[3]), jnp.exp(log_theta[4])
+        blocks = jax.vmap(lambda a: jax.vmap(lambda b: Hemholtz_K0(a, b, ell, var))(X))(X)
+        K = jnp.transpose(blocks, (0, 2, 1, 3)).reshape(3 * n, 3 * n)
+        K += (noise ** 2 + jitter) * jnp.eye(3 * n)
+        c, low = cho_factor(K)
+        alpha = cho_solve((c, low), y)
+        logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(c)))
+        return 0.5 * (y.T @ alpha)[0, 0] + 0.5 * logdet + 0.5 * (3 * n) * jnp.log(2 * jnp.pi)
+
+    nll_vg = jax.jit(jax.value_and_grad(nll))
+
+    def objective(log_theta):
+        val, grad = nll_vg(jnp.asarray(log_theta))
+        return float(val), np.asarray(grad, dtype=float)
+
+    starts = lo + qmc.LatinHypercube(d=5, seed=seed).random(n_restarts) * (hi - lo)
+
+    best = None
+    for t0 in starts:
+        res = spo.minimize(objective, t0, method="L-BFGS-B", jac=True,
+                           bounds=list(zip(lo, hi)), options={"maxiter": 200})
+        if best is None or res.fun < best.fun:
+            best = res
+
+    theta = np.exp(best.x)
+    return {"ell": theta[:3], "var": float(theta[3]), "noise": float(theta[4]),
+            "sample_spacing": spacing, "nll": float(best.fun)}
+
+
+def posterior_mean_batched(test_points, training_coords, ell, var, alpha, means_tests, batch=4000):
+    """Stream the GP posterior mean over chunks of test points. Returns (3*n_test, 1)."""
+    test_points = np.asarray(test_points)
+    means_tests = np.asarray(means_tests).reshape(-1, 3)
+    n_test = test_points.shape[0]
+    out = np.empty((n_test, 3), dtype=float)
+    alpha_local = jnp.asarray(alpha)
+
+    for i in range(0, n_test, batch):
+        tp = test_points[i:i + batch]
+        ks = assemble_dat_shi(tp, training_coords, ell, var, noise_std=0.0, jitter=0.0)
+        contrib = np.array(ks @ alpha_local).reshape(-1, 3)
+        out[i:i + batch] = means_tests[i:i + batch] + contrib
+
+    return out.reshape(-1, 1)
+
+
+# =============================================================================
+# Small helpers
+# =============================================================================
+
+def rmse(a, b):
+    a, b = np.asarray(a), np.asarray(b)
+    return float(np.sqrt(np.mean((a - b) ** 2)))
+
+
+def velocity_magnitude(U):
+    return np.sqrt(np.sum(U ** 2, axis=-1))
+
+
+def interpolate_cfd_to_points(cfd_filepath, query_points, columns, batch=200_000):
+    """
+    Linear-interpolate CFD columns onto query points.
+
+    Builds the Delaunay triangulation ONCE (over the CFD source cloud) via
+    LinearNDInterpolator, then evaluates the query in chunks so the query-side
+    allocations stay bounded. The triangulation itself is sized by the source
+    cloud, not the query, and is unavoidable for linear scattered interpolation.
+    """
+    df = pd.read_csv(cfd_filepath)
+    df.columns = df.columns.str.strip()
+    coords = df[["x-coordinate", "y-coordinate", "z-coordinate"]].to_numpy()
+    vals = df[columns].to_numpy()
+
+    interp = scipy.interpolate.LinearNDInterpolator(coords, vals, fill_value=np.nan)
+
+    query_points = np.asarray(query_points)
+    n = query_points.shape[0]
+    out = np.empty((n, vals.shape[1]), dtype=float)
+    for i in range(0, n, batch):
+        out[i:i + batch] = interp(query_points[i:i + batch])
+    return out
+
+
+def predict_batched(estimator, test_points, batch=4000):
+    """Stream estimator.predict over chunks to bound peak memory."""
+    test_points = np.asarray(test_points)
+    n_test = test_points.shape[0]
+    out = np.empty(n_test, dtype=float)
+    for i in range(0, n_test, batch):
+        out[i:i + batch] = estimator.predict(test_points[i:i + batch])
+    return out
+
+
+# =============================================================================
+# Callable pipeline
+# =============================================================================
+
+def run_gpr(
+    stl_filepath="input_stls/triangle.stl",
+    cfd_filepath="inputs/FLTG.csv",
+    stl_scale=1.0 / 1000.0,
+    training_point_n_requested=120,
+    res=150,
+    posterior_batch=4000,
+    v_inf=(12.0, 0.0, 0.0),
+    n_restarts=6,
+    fit_pressure=True,
+):
+    """
+    Run the full velocity (and optional pressure) GPR pipeline.
+
+    Returns a dict holding everything the plotting code needs:
+        test_points, bounds, res, means_tests, GPR_posterior (Nx3),
+        cfd_test_vels, pressure_posterior, training_coords, mesh_vertices,
+        fit, metrics.
+    """
+    v_inf = np.asarray(v_inf, dtype=float)
+
+    # --- Mesh ---
+    stl_mesh = trimesh.load_mesh(stl_filepath)
+    if stl_scale != 1.0:
+        stl_mesh.apply_scale(stl_scale)
+
+    # --- Panel solver (prior) ---
+    solver = FLOWPanelSolver(stl_mesh, v_inf, julia_script="FP.jl",
+                             julia_bin="julia", verbose=False)
+
+    def prior_fn(pts):
+        return solver.velocity(np.asarray(pts), blank_interior=False).reshape(-1, 3)
+
+    # --- Sample training data ---
+    ground_truth, bounds = sample(
+        cfd_filepath, stl_mesh, method="random",
+        num_samples=training_point_n_requested, epsilon=0.02,
+        use_signed_distance=True, max_points=training_point_n_requested,
+        prior_fn=prior_fn,
+    )
+
+    training_coords = ground_truth[["x-target", "y-target", "z-target"]].to_numpy()
+    training_vels = ground_truth[["x-velocity", "y-velocity", "z-velocity"]].to_numpy().reshape(-1, 1)
+    training_point_n = len(ground_truth)
+    if training_point_n == 0:
+        raise RuntimeError("No training points were sampled.")
+
+    # --- Test grid ---
+    gx = np.linspace(bounds[0, 0], bounds[0, 1], res)
+    gy = np.linspace(bounds[1, 0], bounds[1, 1], res)
+    gz = np.linspace(bounds[2, 0], bounds[2, 1], res)
+    x, y, z = np.meshgrid(gx, gy, gz, indexing="ij")
+    test_points = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
+    del x, y, z
+
+    # --- Prior mean (panel solver), streamed over the grid ---
+    means_tests = np.empty((test_points.shape[0], 3), dtype=float)
+    for i in range(0, test_points.shape[0], posterior_batch):
+        chunk = test_points[i:i + posterior_batch]
+        means_tests[i:i + posterior_batch] = solver.velocity(
+            chunk, blank_interior=True
+        ).reshape(-1, 3)
+
+    means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
+    if np.isnan(means_training).any():
+        raise RuntimeError("NaNs in direct prior mean at training points.")
+    means_training = means_training.reshape(-1, 1)
+
+    prior_train_rmse = rmse(means_training, training_vels)
+
+    # --- Fit GP to residuals ---
+    residuals = training_vels - means_training
+    if np.isnan(residuals).any():
+        raise RuntimeError("NaNs in residuals_for_fit.")
+
+    fit = fit_hyperparams(training_coords, residuals, n_restarts=n_restarts, jitter=1e-6, seed=0)
+
+    ell = jnp.asarray(fit["ell"])
+    var = float(fit["var"])
+    noise = float(fit["noise"])
+
+    # --- Solve for alpha, build posterior ---
+    K = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=noise, jitter=1e-8)
+    c, low = cho_factor(K)
+    alpha = cho_solve((c, low), jnp.asarray(residuals))
+
+    GPR_posterior = posterior_mean_batched(
+        test_points, training_coords, ell, var, alpha, means_tests, batch=posterior_batch
+    )
+    GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
+
+    # Training reconstruction check.
+    K_signal = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=0.0, jitter=0.0)
+    train_post = jnp.asarray(means_training) + K_signal @ alpha
+    posterior_train_rmse = rmse(np.array(train_post), training_vels)
+
+    # --- CFD truth on test grid (velocity + pressure in one griddata pass) ---
+    cfd_test = interpolate_cfd_to_points(
+        cfd_filepath, test_points,
+        ["x-velocity", "y-velocity", "z-velocity", "pressure"],
+    )
+    cfd_test_vels = cfd_test[:, :3]
+    cfd_p = cfd_test[:, 3]
+
+    valid_cfd = ~np.any(np.isnan(cfd_test_vels), axis=1)
+    truth = cfd_test_vels[valid_cfd]
+    prior_test_rmse = rmse(means_tests[valid_cfd], truth)
+    post_test_rmse = rmse(GPR_posterior[valid_cfd], truth)
+    truth_test_rms = float(np.sqrt(np.mean(truth ** 2)))
+
+    # --- Pressure GPR (scalar, sklearn) ---
+    pressure_posterior = None
+    pressure_test_rmse = None
+    if fit_pressure:
+        train_p = ground_truth["pressure"].to_numpy()
+        p_kernel = (
+            ConstantKernel(1.0, (1e-3, 1e3))
+            * Matern(length_scale=[1.0, 1.0, 1.0], length_scale_bounds=(1e-2, 1e2), nu=2.5)
+            + WhiteKernel(1e-3, (1e-8, 1e1))
+        )
+        p_gpr = GaussianProcessRegressor(
+            kernel=p_kernel, normalize_y=True, n_restarts_optimizer=8, random_state=0,
+        ).fit(training_coords, train_p)
+        pressure_posterior = predict_batched(p_gpr, test_points, batch=posterior_batch)
+
+        valid_p = ~np.isnan(cfd_p)
+        pressure_test_rmse = rmse(pressure_posterior[valid_p], cfd_p[valid_p])
+
+    metrics = {
+        "training_point_n": training_point_n,
+        "prior_train_rmse": prior_train_rmse,
+        "posterior_train_rmse": posterior_train_rmse,
+        "prior_test_rmse": prior_test_rmse,
+        "post_test_rmse": post_test_rmse,
+        "truth_test_rms": truth_test_rms,
+        "rel_prior_test_rmse": prior_test_rmse / max(truth_test_rms, 1e-12),
+        "rel_post_test_rmse": post_test_rmse / max(truth_test_rms, 1e-12),
+        "valid_cfd": int(valid_cfd.sum()),
+        "n_test": int(len(valid_cfd)),
+        "pressure_test_rmse": pressure_test_rmse,
+    }
+
+    return {
+        "test_points": test_points,
+        "bounds": bounds,
+        "res": res,
+        "means_tests": means_tests,
+        "GPR_posterior": GPR_posterior,
+        "cfd_test_vels": cfd_test_vels,
+        "pressure_posterior": pressure_posterior,
+        "training_coords": training_coords,
+        "mesh_vertices": np.asarray(solver.mesh.vertices),
+        "fit": fit,
+        "metrics": metrics,
+    }
+
+
+if __name__ == "__main__":
+    result = run_gpr()
+    print("\nMetrics:")
+    for k, v in result["metrics"].items():
+        print(f"  {k}: {v}")
