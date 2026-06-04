@@ -5,7 +5,7 @@ import pyvista as pv
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PKL_PATH  = r"INTERP\csv_with_everything.pkl"
+PKL_PATH  = r"inputs/csv_with_everything.pkl"
 N_POINTS  = 4      # number of nearest neighbours used for interpolation
 SHARPNESS = 2.0    # IDW falloff sharpness
 
@@ -13,7 +13,7 @@ SHARPNESS = 2.0    # IDW falloff sharpness
 # ---------------------------------------------------------------------------
 # Sampler
 # ---------------------------------------------------------------------------
-def build_cfd_sampler(pkl_path: str, n_points: int = 8, sharpness: float = 2.0):
+def build_cfd_sampler(df, n_points: int = 8, sharpness: float = 2.0):
     """
     Load a CFD pickle and return a sampler function.
 
@@ -23,7 +23,6 @@ def build_cfd_sampler(pkl_path: str, n_points: int = 8, sharpness: float = 2.0):
     n_points  : number of nearest neighbours used for IDW interpolation
     sharpness : IDW falloff sharpness
     """
-    df = pd.read_pickle(pkl_path)
 
     cloud = pv.PolyData(df[['x-coordinate', 'y-coordinate', 'z-coordinate']].values)
     cloud['x-velocity'] = df['x-velocity'].values
@@ -31,7 +30,7 @@ def build_cfd_sampler(pkl_path: str, n_points: int = 8, sharpness: float = 2.0):
     cloud['z-velocity'] = df['z-velocity'].values
     cloud['pressure']   = df['pressure'].values
 
-    def sample(points_or_x, y=None, z=None) -> dict:
+    def sample_dat_shi(points_or_x, y=None, z=None) -> dict:
         """
         Interpolate velocity and pressure at arbitrary query points.
 
@@ -59,15 +58,12 @@ def build_cfd_sampler(pkl_path: str, n_points: int = 8, sharpness: float = 2.0):
             sharpness=sharpness,
             strategy='null_value',
         )
+        return np.stack([result['x-velocity'],
+                        result['y-velocity'],
+                        result['z-velocity'],
+                        result['pressure']], axis=1)
 
-        return {
-            'velocity': np.stack([result['x-velocity'],
-                                  result['y-velocity'],
-                                  result['z-velocity']], axis=1),
-            'pressure': result['pressure'],
-        }
-
-    return sample
+    return sample_dat_shi
 
 
 # ---------------------------------------------------------------------------
