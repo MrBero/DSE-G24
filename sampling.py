@@ -261,7 +261,7 @@ def sample(
     samples=None,
     method="CSV",
     epsilon=0.02,
-    num_samples=150,
+    num_samples=400,
     use_signed_distance=True,
     oversample_factor=4,
     max_random_iters=100,

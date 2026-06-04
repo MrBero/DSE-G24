@@ -229,13 +229,77 @@ def plot_pressure_slice(result, z_slice_target=2.5):
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     return fig
+def plot_xz_slice_comparison(result, y_slice_target=0.0):
+    """2x3 panel of CFD / prior / posterior |u| and their differences at a y-slice (xz plane)."""
+    res = result["res"]
+    bounds = result["bounds"]
+    test_points = np.asarray(result["test_points"])
+    verts = np.asarray(result["mesh_vertices"])
 
+    P = test_points.reshape(res, res, res, 3)
+    prior_U = np.asarray(result["means_tests"]).reshape(res, res, res, 3)
+    post_U = np.asarray(result["GPR_posterior"]).reshape(res, res, res, 3)
+    cfd_U = np.asarray(result["cfd_test_vels"]).reshape(res, res, res, 3)
 
-def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
+    # Grid along the y-axis (index 1 in bounds)
+    y_grid = np.linspace(bounds[1, 0], bounds[1, 1], res)
+    k = _slice_index(y_grid, y_slice_target)
+    y_here = y_grid[k]
+
+    # Extract x and z coordinates for the constant-y slice
+    Xs = P[:, k, :, 0]
+    Zs = P[:, k, :, 2]
+
+    prior_mag = _velocity_magnitude(prior_U[:, k, :, :])
+    post_mag = _velocity_magnitude(post_U[:, k, :, :])
+    cfd_mag = _velocity_magnitude(cfd_U[:, k, :, :])
+
+    # Find mesh vertices near the y-slice plane
+    slice_tol = 0.5 * abs(y_grid[1] - y_grid[0]) if res > 1 else 1e-6
+    near_slice = np.abs(verts[:, 1] - y_here) <= slice_tol
+
+    prior_err = prior_mag - cfd_mag
+    post_err = post_mag - cfd_mag
+
+    fig, axs = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
+
+    mag_vmin = float(np.nanmin([cfd_mag, prior_mag, post_mag]))
+    mag_vmax = float(np.nanmax([cfd_mag, prior_mag, post_mag]))
+    err_lim = float(np.nanmax(np.abs([prior_err, post_err])))
+    pp_lim = float(np.nanmax(np.abs(post_mag - prior_mag)))
+
+    mag_levels = np.linspace(mag_vmin, mag_vmax, 30)
+    err_levels = np.linspace(-err_lim, err_lim, 30)
+    pp_levels = np.linspace(-pp_lim, pp_lim, 30)
+
+    plot_items = [
+        (axs[0, 0], cfd_mag, "CFD truth |u|", "viridis", mag_levels),
+        (axs[0, 1], prior_mag, "Prior |u|", "viridis", mag_levels),
+        (axs[0, 2], post_mag, "Posterior |u|", "viridis", mag_levels),
+        (axs[1, 0], post_mag - prior_mag, "Posterior - Prior |u|", "coolwarm", pp_levels),
+        (axs[1, 1], prior_err, "Prior - CFD |u|", "coolwarm", err_levels),
+        (axs[1, 2], post_err, "Posterior - CFD |u|", "coolwarm", err_levels),
+    ]
+
+    for ax, field, title, cmap, levels in plot_items:
+        pc = ax.contourf(Xs, Zs, field, levels=levels, cmap=cmap, extend="both")
+        fig.colorbar(pc, ax=ax)
+        # Plot vertices (x, z) on the slice
+        if near_slice.any():
+            ax.scatter(verts[near_slice, 0], verts[near_slice, 2], c="black", s=8)
+        ax.set_aspect("equal")
+        ax.set_title(f"{title}, y={y_here:.4g}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("z")
+
+    return fig
+
+def plot_all(result, z_slice_target=2.5, y_slice_target=0.0, n_slices=5, show=True):
     """Convenience: produce every figure."""
     figs = [
         plot_posterior_3d(result),
         plot_slice_comparison(result, z_slice_target),
+        plot_xz_slice_comparison(result, y_slice_target),  # Newly added xz plane
         plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z"),
     ]
     pf = plot_pressure_slice(result, z_slice_target)
