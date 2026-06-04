@@ -129,16 +129,13 @@ def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, se
             if best is None or res.fun < best.fun:
                 best = res
         except Exception as e:
-            # Without heuristics, bad starts may cause Cholesky to fail. 
-            # We must catch the error so it doesn't kill the other restarts.
-            print(f"    [!] Restart failed (likely Singular Matrix): {e}")
+            print(f"Restart failed")
 
     if best is None:
         raise RuntimeError("All optimizer restarts crashed. The math broke.")
 
     theta = np.exp(best.x)
     
-    # Returning a dummy 'sample_spacing' of 0.0 since we deleted the real calculation
     return {"ell": theta[:3], "var": float(theta[3]), "noise": float(theta[4]),
             "sample_spacing": 0.0, "nll": float(best.fun)}
 

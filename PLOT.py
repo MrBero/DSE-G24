@@ -128,11 +128,14 @@ def plot_slice_comparison(result, z_slice_target=2.5):
     return fig
 
 
-def plot_multi_slices(result, n_slices=5, field="posterior", axis="z"):
+def plot_multi_slices(result, n_slices=5, field="posterior", axis="z",
+                      slice_range=(0.1, 6.5)):
     """Grid of |u| slices across several planes along the chosen axis.
 
-    field: "posterior", "prior", or "cfd"
-    axis:  "x", "y", or "z"
+    field:       "posterior", "prior", or "cfd"
+    axis:        "x", "y", or "z"
+    slice_range: (lo, hi) coordinate range along `axis` to sample slices
+                 within; None spans the full bounds.
     """
     res = result["res"]
     bounds = result["bounds"]
@@ -149,7 +152,13 @@ def plot_multi_slices(result, n_slices=5, field="posterior", axis="z"):
 
     ax_idx = {"x": 0, "y": 1, "z": 2}[axis]
     grid = np.linspace(bounds[ax_idx, 0], bounds[ax_idx, 1], res)
-    ks = np.unique(np.linspace(0, res - 1, n_slices).round().astype(int))
+
+    if slice_range is None:
+        lo, hi = grid[0], grid[-1]
+    else:
+        lo, hi = slice_range
+    targets = np.linspace(lo, hi, n_slices)
+    ks = np.unique([_slice_index(grid, t) for t in targets])
 
     vmin, vmax = float(np.nanmin(mag)), float(np.nanmax(mag))
     levels = np.linspace(vmin, vmax, 30)
