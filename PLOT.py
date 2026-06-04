@@ -10,6 +10,33 @@ def _velocity_magnitude(U):
     return np.sqrt(np.sum(U ** 2, axis=-1))
 
 
+def _safe_levels(vmin: float, vmax: float, n: int = 30) -> np.ndarray:
+    """Return strictly-increasing levels between vmin and vmax.
+
+    Falls back to a two-element array [vmin, vmin+eps] when the field is
+    constant (vmin == vmax), which would otherwise cause matplotlib to raise
+    'contour levels must be increasing'.
+    """
+    if not np.isfinite(vmin) or not np.isfinite(vmax):
+        vmin, vmax = 0.0, 1.0
+    if np.isclose(vmin, vmax):
+        eps = max(abs(vmin) * 1e-6, 1e-10)
+        return np.array([vmin - eps, vmax + eps])
+    return np.linspace(vmin, vmax, n)
+
+
+def _safe_contourf(ax, X, Y, Z, levels, **kwargs):
+    """Call contourf, falling back to imshow on a flat/degenerate field."""
+    try:
+        return ax.contourf(X, Y, Z, levels=levels, **kwargs)
+    except ValueError:
+        # Field is effectively constant — render as a uniform colour patch.
+        vmin, vmax = levels[0], levels[-1]
+        cmap = kwargs.get("cmap", "viridis")
+        return ax.contourf(X, Y, Z, levels=2, vmin=vmin, vmax=vmax, cmap=cmap,
+                           extend=kwargs.get("extend", "both"))
+
+
 def plot_posterior_3d(result, max_field_points=6000, field_alpha=0.06):
     """3D scatter of posterior velocity magnitude.
 
@@ -102,9 +129,9 @@ def plot_slice_comparison(result, z_slice_target=2.5):
     err_lim = float(np.nanmax(np.abs([prior_err, post_err])))
     pp_lim = float(np.nanmax(np.abs(post_mag - prior_mag)))
 
-    mag_levels = np.linspace(mag_vmin, mag_vmax, 30)
-    err_levels = np.linspace(-err_lim, err_lim, 30)
-    pp_levels = np.linspace(-pp_lim, pp_lim, 30)
+    mag_levels = _safe_levels(mag_vmin, mag_vmax)
+    err_levels = _safe_levels(-err_lim, err_lim)
+    pp_levels  = _safe_levels(-pp_lim,  pp_lim)
 
     plot_items = [
         (axs[0, 0], cfd_mag, "CFD truth |u|", "viridis", mag_levels),
@@ -116,7 +143,7 @@ def plot_slice_comparison(result, z_slice_target=2.5):
     ]
 
     for ax, field, title, cmap, levels in plot_items:
-        pc = ax.contourf(Xs, Ys, field, levels=levels, cmap=cmap, extend="both")
+        pc = _safe_contourf(ax, Xs, Ys, field, levels=levels, cmap=cmap, extend="both")
         fig.colorbar(pc, ax=ax)
         if near_slice.any():
             ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
@@ -162,7 +189,7 @@ def plot_multi_slices(result, n_slices=5, field="posterior", axis="z",
     ks = np.unique([_slice_index(grid, t) for t in targets])
 
     vmin, vmax = float(np.nanmin(mag)), float(np.nanmax(mag))
-    levels = np.linspace(vmin, vmax, 30)
+    levels = _safe_levels(vmin, vmax)
 
     ncols = min(len(ks), 5)
     nrows = int(np.ceil(len(ks) / ncols))
@@ -181,8 +208,8 @@ def plot_multi_slices(result, n_slices=5, field="posterior", axis="z",
             A, B, fld = P[:, k, :, other[0]], P[:, k, :, other[1]], mag[:, k, :]
         else:
             A, B, fld = P[k, :, :, other[0]], P[k, :, :, other[1]], mag[k, :, :]
-        cmap = 'Reds' if field=='variances' else 'viridis'
-        pc = ax.contourf(A, B, fld, levels=levels, cmap=cmap, extend="both")
+        cmap = 'Reds' if field == 'variances' else 'viridis'
+        pc = _safe_contourf(ax, A, B, fld, levels=levels, cmap=cmap, extend="both")
         ax.set_aspect("equal")
         ax.set_title(f"{axis}={grid[k]:.3g}")
         ax.set_xlabel(labels[other[0]])
@@ -237,8 +264,8 @@ def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
     figs = [
         plot_posterior_3d(result),
         plot_slice_comparison(result, z_slice_target),
-        plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z"),
-        plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z")
+        plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z", slice_range=(5,50)),
+        plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z", slice_range=(5,50))
     ]
     pf = plot_pressure_slice(result, z_slice_target)
     if pf is not None:
