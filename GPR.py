@@ -45,11 +45,12 @@ def matern52_np(v1, v2, ell, var):
         (diff[0] / ell[0]) ** 2
         + (diff[1] / ell[1]) ** 2
         + (diff[2] / ell[2]) ** 2
-        + 1e-8
+        + 1e-8 # so we don't run into strange stuff at r=0
     )
     return var * (1.0 + jnp.sqrt(5.0) * r + (5.0 / 3.0) * r ** 2) * jnp.exp(-jnp.sqrt(5.0) * r)
 
 # full derivation of 3x3 k0 matrix in the final report
+#compile just in time for speed
 @jax.jit
 def Hemholtz_K0(V1, V2, ell, var):
     """3x3 divergence-free vector kernel block from Hessian of scalar Matérn-5/2."""
@@ -61,7 +62,7 @@ def Hemholtz_K0(V1, V2, ell, var):
             [H[2, 0], H[2, 1], -H[0, 0] - H[1, 1]],
         ]
     )
-
+# assemble the covariance matrix from K0 matrices 
 def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
     """
     Block vector-valued covariance, point-major ordering:
@@ -90,41 +91,44 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
 # Hyperparam fitting, the fun stuff
 def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, seed=0):
     
-    X = jnp.asarray(train_coords)
-    y = jnp.asarray(train_residuals).reshape(-1, 1)
-    n = X.shape[0]
-
+    X = jnp.asarray(train_coords) #training coordinates list, loaded into jax numpy
+    y = jnp.asarray(train_residuals).reshape(-1, 1) #load y 
+    n = X.shape[0] # number of points
+    #lower and upper bound in log space 
     lo = np.full(5, np.log(1e-5))
     hi = np.full(5, np.log(1e5))
 
     @jax.jit
+    #find negative log likelihood
     def nll(log_theta):
-        ell = jnp.exp(log_theta[:3])
-        var = jnp.exp(log_theta[3])
-        noise = jnp.exp(log_theta[4])
-        
+        ell = jnp.exp(log_theta[:3]) # exponentiate length scales to convert back from log space
+        var = jnp.exp(log_theta[3]) # same with variance
+        noise = jnp.exp(log_theta[4]) # same with noise
+        #assemble K matrix (as above)
         blocks = jax.vmap(lambda a: jax.vmap(lambda b: Hemholtz_K0(a, b, ell, var))(X))(X)
         K = jnp.transpose(blocks, (0, 2, 1, 3)).reshape(3 * n, 3 * n)
-        K += (noise ** 2 + jitter) * jnp.eye(3 * n)
+        K += (noise ** 2 + jitter) * jnp.eye(3 * n) #add noise and jitter on the diagnonal 
         
-        c, low = cho_factor(K)
-        alpha = cho_solve((c, low), y)
-        logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(c)))
-        
-        return 0.5 * (y.T @ alpha)[0, 0] + 0.5 * logdet + 0.5 * (3 * n) * jnp.log(2 * jnp.pi)
-
+        c, low = cho_factor(K) #apply cholesky decomp (K = LL^T)
+        alpha = cho_solve((c, low), y) #solve for weights
+        logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(c))) # calculate the determinant by using the fact that it's the sum of diagonal entries of c squared. 
+        #return negative log likelihood, this is pretty standard
+        return 0.5 * (y.T @ alpha)[0, 0] + 0.5 * logdet + 0.5 * (3 * n) * jnp.log(2 * jnp.pi) 
+    #find value and gradient using autodiff for the objective function
     nll_vg = jax.jit(jax.value_and_grad(nll))
-
+    #objective function, helper for the spo optimizer later
     def objective(log_theta):
         val, grad = nll_vg(jnp.asarray(log_theta))
         return float(val), np.asarray(grad, dtype=float)
 
-    # 2. Latin Hypercube is maintained, but now stretches across the massive generic box
+    #starting points spaced in the lo-high space in a latin hypercube to cover the space
     starts = lo + qmc.LatinHypercube(d=5, seed=seed).random(n_restarts) * (hi - lo)
 
+    #optimizer loop 
     best = None
     for t0 in starts:
         try:
+            # optimizer function for spo using the L-BFGS-B method, using autodiff from objective, between higher and lower bound, max 200 steps.
             res = spo.minimize(
                 objective, t0, method="L-BFGS-B", jac=True,
                 bounds=list(zip(lo, hi)), options={"maxiter": 200}
@@ -136,42 +140,41 @@ def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, se
 
     if best is None:
         raise RuntimeError("All optimizer restarts crashed. The math broke.")
-
+    #recover theta from log space
     theta = np.exp(best.x)
-    
+    #return hyperparams
     return {"ell": theta[:3], "var": float(theta[3]), "noise": float(theta[4]),
             "sample_spacing": 0.0, "nll": float(best.fun)}
 
-
+# posterior mean calculation, originally computed as one. We ran into memory issues... so now it is batched in sets of =batch points.
 def posterior_mean_batched(test_points, training_coords, ell, var, alpha, means_tests,
                            batch=4000, progress_every=0):
     """Stream the GP posterior mean over chunks of test points. Returns (3*n_test, 1)."""
+    #get test points, ie the points that we evaluate the function at 
     test_points = np.asarray(test_points)
     means_tests = np.asarray(means_tests).reshape(-1, 3)
     n_test = test_points.shape[0]
-    out = np.empty((n_test, 3), dtype=float)
-    alpha_local = jnp.asarray(alpha)
+    out = np.empty((n_test, 3), dtype=float) 
+    alpha_local = jnp.asarray(alpha) # reminder: alpha is (K + sigma^2)^-1 (y-y_mean)
     n_chunks = (n_test + batch - 1) // batch
-
+    
     for ci, i in enumerate(range(0, n_test, batch)):
-        tp = test_points[i:i + batch]
+        tp = test_points[i:i + batch] 
+        # cross-covariance K(X_*, X)
         ks = assemble_dat_shi(tp, training_coords, ell, var, noise_std=0.0, jitter=0.0)
-        contrib = np.array(ks @ alpha_local).reshape(-1, 3)
-        out[i:i + batch] = means_tests[i:i + batch] + contrib
+        # now do 
+        contrib = np.array(ks @ alpha_local).reshape(-1, 3) # calculate prediction at the point by doing k(x_*, x) @ (K + sigma^2)^-1 (y-y_mean)
+        out[i:i + batch] = means_tests[i:i + batch] + contrib # write output by adding mean to deviation prediction
         if progress_every and (ci % progress_every == 0 or ci == n_chunks - 1):
             print(f"    posterior vels chunk {ci + 1}/{n_chunks}", flush=True)
 
     return out.reshape(-1, 1)
 
+# calculate the posterior variance in batches... again, because the matrix was taking up 23 gb of ram. 
+# EThe equation we're using here for variance is: Sigma_* = K(X_*, X_*) - K(X_*, X) * (K(X, X) + noise^2 I)^-1 * K(X_*, X)^T
 def posterior_vars_batched(test_points, training_coords, ell, var, c, low,
                            batch=2000, progress_every=0):
-    """
-    Stream the GP posterior variance diagonal over chunks of test points.
 
-    Solves each chunk's cross-covariance against the Cholesky factors (c, low)
-    locally, so no full-grid K_test or beta is ever allocated. Peak memory
-    scales with `batch`, not with the number of test points. Returns (3*n_test,).
-    """
     test_points = np.asarray(test_points)
     n_test = test_points.shape[0]
     out = np.empty((n_test * 3,), dtype=float)
@@ -180,8 +183,9 @@ def posterior_vars_batched(test_points, training_coords, ell, var, c, low,
     for ci, i in enumerate(range(0, n_test, batch)):
         chunk = test_points[i:i + batch]
         m = chunk.shape[0]
-
+        
         K_tt = assemble_dat_shi(chunk, chunk, ell, var)              # (3m, 3m)
+        # 
         k_tc = assemble_dat_shi(chunk, training_coords, ell, var)    # (3m, 3n)
         beta_chunk = cho_solve((c, low), jnp.asarray(k_tc.T))        # (3n, 3m)
         diag = jnp.diag(K_tt - k_tc @ beta_chunk)                    # (3m,)
@@ -192,9 +196,7 @@ def posterior_vars_batched(test_points, training_coords, ell, var, c, low,
     return out
 
 
-# =============================================================================
-# Small helpers
-# =============================================================================
+# helpers
 
 def rmse(a, b):
     a, b = np.asarray(a), np.asarray(b)
@@ -251,19 +253,6 @@ def run_gpr(
     sample_config=None,
     verbose=True,
 ):
-    """
-    Run the full velocity (and optional pressure) GPR pipeline.
-
-    Sampling is selected with sample_method (e.g. "cylinder", "drone_array",
-    "random") and tuned with sample_config. Different methods take different
-    config keys; if sample_config is None, the method's default from
-    SAMPLE_DEFAULTS is used.
-
-    Returns a dict holding everything the plotting code needs:
-        test_points, bounds, res, means_tests, GPR_posterior (Nx3),
-        cfd_test_vels, pressure_posterior, training_coords, mesh_vertices,
-        fit, metrics.
-    """
     v_inf = np.asarray(v_inf, dtype=float)
 
     

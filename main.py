@@ -8,17 +8,11 @@ def main():
         stl_filepath="input_stls/Aerospecial_building.stl",
         cfd_filepath="inputs/csv_with_everything.pkl",
         stl_scale=1.0 / 1000.0,
-<<<<<<< HEAD
         stl_rotate=-np.pi/2,
         training_point_n_requested=200,
         method='random',
         res=30,
         v_inf=(0.0, 12.0, 0.0),
-=======
-        training_point_n_requested=100,
-        res=100,
-        v_inf=(12.0, 0.0, 0.0),
->>>>>>> d98ac9b (batching fix for uncertainty coded by denis)
         n_restarts=6,
         fit_pressure=True,
         verbose=False,
@@ -33,7 +27,7 @@ def main():
 
     )
 
-    plot_all(result, z_slice_target=5, show=True)
+    plot_all(result, z_slice_target=-25, show=True)
 
 
 if __name__ == "__main__":
