@@ -179,10 +179,10 @@ class VortexSheetSolver:
 
     # convenience pass-throughs
     def bc_residual(self):
-        return self._solver.bc_residual()
+        return self.bc_residual()
 
     def net_source(self):
-        return self._solver.net_source()
+        return self.net_source()
 
 # =========================================================================== #
 #  Automatic slice plotting (all params derived from geometry)                 #
@@ -330,7 +330,7 @@ def auto_visualize(solver, savepath=None, show=False):
 
 
 def main():
-    stl = sys.argv[1] if len(sys.argv) > 1 else 'inputs/triangle.stl'
+    stl = trimesh.load_mesh('input_stls/triangle.stl')
 
     print(f"\n=== Arbitrary geometry: {stl} ===")
     solver = VortexSheetSolver(stl, [10.0, 0.0, 0.0])
