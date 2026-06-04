@@ -23,7 +23,6 @@ from jax.scipy.linalg import cho_factor, cho_solve
 
 jax.config.update("jax_enable_x64", True)
 
-from potential_flow_run import *
 from flowpanelwrapper import FLOWPanelSolver
 from sampling import sample
 
@@ -33,7 +32,6 @@ import builtins
 
 #this might break prints so comment if bad
 _original_print = builtins.print
-
 def _print(*args, **kwargs):
     _original_print(f"[{time.perf_counter():.3f}]   ", *args, **kwargs)
 
@@ -161,7 +159,7 @@ def posterior_mean_batched(test_points, training_coords, ell, var, alpha, means_
         contrib = np.array(ks @ alpha_local).reshape(-1, 3)
         out[i:i + batch] = means_tests[i:i + batch] + contrib
         if progress_every and (ci % progress_every == 0 or ci == n_chunks - 1):
-            print(f"    posterior chunk {ci + 1}/{n_chunks}", flush=True)
+            print(f"    posterior vels chunk {ci + 1}/{n_chunks}", flush=True)
 
     return out.reshape(-1, 1)
 
@@ -184,8 +182,7 @@ def posterior_vars_batched(test_points, training_coords, ell, var, beta,
         contrib = k_slice @ beta_slice
         out[i*3:(i + batch)*3] = jnp.diag(K_tests_slice - contrib)
         if progress_every and (ci % progress_every == 0 or ci == n_chunks - 1):
-            print(f"    posterior chunk {ci + 1}/{n_chunks}", flush=True)
-    print(out)
+            print(f"    posterior vars chunk {ci + 1}/{n_chunks}", flush=True)
     return out
 
 
@@ -200,30 +197,6 @@ def rmse(a, b):
 
 def velocity_magnitude(U):
     return np.sqrt(np.sum(U ** 2, axis=-1))
-
-
-def interpolate_cfd_to_points(cfd_filepath, query_points, columns, batch=200_000):
-    """
-    Linear-interpolate CFD columns onto query points.
-
-    Builds the Delaunay triangulation ONCE (over the CFD source cloud) via
-    LinearNDInterpolator, then evaluates the query in chunks so the query-side
-    allocations stay bounded. The triangulation itself is sized by the source
-    cloud, not the query, and is unavoidable for linear scattered interpolation.
-    """
-    df = pd.read_csv(cfd_filepath)
-    df.columns = df.columns.str.strip()
-    coords = df[["x-coordinate", "y-coordinate", "z-coordinate"]].to_numpy()
-    vals = df[columns].to_numpy()
-
-    interp = scipy.interpolate.LinearNDInterpolator(coords, vals, fill_value=np.nan)
-
-    query_points = np.asarray(query_points)
-    n = query_points.shape[0]
-    out = np.empty((n, vals.shape[1]), dtype=float)
-    for i in range(0, n, batch):
-        out[i:i + batch] = interp(query_points[i:i + batch])
-    return out
 
 
 def predict_batched(estimator, test_points, batch=4000):
@@ -261,7 +234,9 @@ def run_gpr(
     stl_filepath="input_stls/triangle.stl",
     cfd_filepath="inputs/FLTG.csv",
     stl_scale=1.0 / 1000.0,
+    stl_rotate = None,
     training_point_n_requested=160,
+    method='cylinder',
     res=150,
     posterior_batch=4000,
     v_inf=(12.0, 0.0, 0.0),
@@ -285,6 +260,10 @@ def run_gpr(
         stl_mesh = trimesh.load_mesh(stl_filepath)
         if stl_scale != 1.0:
             stl_mesh.apply_scale(stl_scale)
+        if stl_rotate is not None:
+            centroid = stl_mesh.centroid
+            rot_matrix = trimesh.transformations.rotation_matrix(angle=stl_rotate, direction=[0,0,1], point=centroid)
+            stl_mesh.apply_transform(rot_matrix)
 
         # --- Panel solver (prior) ---
         solver = FLOWPanelSolver(stl_mesh, v_inf, julia_script="FP.jl",
@@ -296,12 +275,9 @@ def run_gpr(
 
         bar.text('Sampling...')
         # --- Sample training data ---
-        cfg = sample_config if sample_config is not None else SAMPLE_DEFAULTS.get(sample_method, {})
-        ground_truth, bounds = sample(
-            cfd_filepath, stl_mesh, method=sample_method,
-            epsilon=0.02, use_signed_distance=True,
-            config=cfg,
-        )
+        ground_truth, bounds, sample_dat_shi = sample(
+        cfd_filepath, stl_mesh, method=method,
+        epsilon=0.02, use_signed_distance=True,)
 
         bar.text('Training points...')
         training_coords = ground_truth[["x-target", "y-target", "z-target"]].to_numpy()
@@ -387,9 +363,9 @@ def run_gpr(
 
         bar.text('Interpolating truth for comparison...')
         # --- CFD truth on test grid (velocity + pressure in one griddata pass) ---
-        cfd_test = interpolate_cfd_to_points(
-            cfd_filepath, test_points,
-            ["x-velocity", "y-velocity", "z-velocity", "pressure"])
+        
+        cfd_test = sample_dat_shi(test_points)
+
         cfd_test_vels = cfd_test[:, :3]
         cfd_p = cfd_test[:, 3]
 
