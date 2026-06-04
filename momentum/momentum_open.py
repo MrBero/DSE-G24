@@ -57,8 +57,8 @@ def o3d_to_pyvista(mesh: o3d.geometry.TriangleMesh) -> pv.PolyData:
 def surface_force_bpa(
     points: np.ndarray,
     center: np.ndarray,
-    velocity: np.ndarray,
-    pressure: float,
+    velocity: np.ndarray, # Shape (N, 3)
+    pressure: np.ndarray, # Shape (N,)
     L: float,
     rho: float = 1.225,
     radii_factors: list[float] = [1.0]
@@ -69,11 +69,22 @@ def surface_force_bpa(
         cell_normals=True, point_normals=False, auto_orient_normals=True
     )
 
-    n = mesh_pv.cell_data["Normals"]
-    v = np.broadcast_to(velocity, n.shape)
-    v_dot_n = (v * n).sum(axis=1, keepdims=True)
+    # 1. Assign local values to point data
+    mesh_pv.point_data["velocity"] = velocity
+    mesh_pv.point_data["pressure"] = pressure
 
-    mesh_pv.cell_data["total_force"] = (pressure * n) + (rho * v * v_dot_n)
+    # 2. Interpolate point data to cell data for alignment with cell normals
+    mesh_pv = mesh_pv.point_data_to_cell_data()
+
+    n = mesh_pv.cell_data["Normals"]
+    v = mesh_pv.cell_data["velocity"]
+    p = mesh_pv.cell_data["pressure"]
+
+    # 3. Compute dot product and force per cell area
+    v_dot_n = np.sum(v * n, axis=1, keepdims=True)
+    mesh_pv.cell_data["total_force"] = (p[:, np.newaxis] * n) + (rho * v * v_dot_n)
+    
+    # 4. Integrate total force over surface area
     F = mesh_pv.integrate_data().cell_data["total_force"][0]
     
     return F, mesh_pv, pcd
@@ -86,14 +97,21 @@ if __name__ == "__main__":
     center = np.array([0.0, 0.0, H / 2.0])
     
     points = sample_cylinder_uniform(R, H, n=3000)
+    num_points = points.shape[0]
+
+    # Generate pointwise arrays (using the original global values as an example)
+    velocities = np.zeros((num_points, 3))
+    velocities[:, 0] = 10.0 
+    
+    pressures = np.full(num_points, 20.0)
 
     F, mesh, pcd = surface_force_bpa(
         points=points,
         center=center,
-        velocity=np.array([10.0, 0.0, 0.0]),
-        pressure=20.0,
-        L=.5, 
-        radii_factors=[.5,1.0,2]
+        velocity=velocities,
+        pressure=pressures,
+        L=0.5, 
+        radii_factors=[0.5, 1.0, 2.0]
     )
 
     print(f"Force vector : {F}")
@@ -101,6 +119,6 @@ if __name__ == "__main__":
 
     # Minimal visualization
     pl = pv.Plotter()
-    pl.add_mesh(mesh, color="lightblue", show_edges=True)
+    pl.add_mesh(mesh, scalars="pressure", cmap="viridis", show_edges=True)
     pl.add_points(np.asarray(pcd.points), color="navy", point_size=5)
     pl.show()
