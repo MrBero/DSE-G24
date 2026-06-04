@@ -7,7 +7,7 @@ def main():
         stl_filepath="input_stls/triangle.stl",
         cfd_filepath="inputs/FLTG.csv",
         stl_scale=1.0 / 1000.0,
-        training_point_n_requested=600,
+        training_point_n_requested=180,
         res=100,
         v_inf=(12.0, 0.0, 0.0),
         n_restarts=6,
