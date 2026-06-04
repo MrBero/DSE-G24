@@ -47,6 +47,50 @@ def _mesh_reject_mask(points, stl_mesh, epsilon=0.02, use_signed_distance=True):
 # =============================================================================
 # Drone-array sampling  
 # =============================================================================
+def _oblique_cylinder_points(stl_mesh,
+                             r_factor,
+                             h_factor,
+                             tilt_deg=23.0,
+                             clearance=0.1,
+                             n_rings=7,
+                             n_per_ring=16):
+    V = np.asarray(stl_mesh.vertices)               #get corners of building
+    width_body  = V[:, 1].max() - V[:, 1].min()     #ymax-ymin
+    height_body = V[:, 2].max() - V[:, 2].min()     #zmax-zmin
+    char_size   = max(width_body, height_body)      #get largest
+
+    R = r_factor * char_size                        #get radius
+    H = h_factor * char_size                        #get height
+
+    z_lo, z_hi = V[:, 2].min(), V[:, 2].max()       #lowest point, highest point
+    z_mid = 0.5 * (z_lo + z_hi)                     #mid height of building
+    cx = 0.5 * (V[:, 0].min() + V[:, 0].max())      #x location of centroid
+    cy = 0.5 * (V[:, 1].min() + V[:, 1].max())      #y location of centroid
+
+    shift_per_height = np.tan(np.radians(tilt_deg)) #slope of oblique cylinder
+
+    z_bottom = z_lo + clearance                     #bottom z-coordinate of cricle
+    dz_bottom = z_bottom - z_mid                    #change between bottom and mid
+    bottom_cx = cx + shift_per_height * dz_bottom   #change in x between bottom and mid bcs of tilt
+    bottom_cy = cy                                  #y doesnt change
+
+    z_rings = np.linspace(z_bottom, z_bottom + H, n_rings)          #get a spacing of rings
+    phi = np.concatenate([
+    np.linspace(-np.pi/4, np.pi/4, n_per_ring // 2, endpoint=False),     
+    np.linspace(np.pi/4, 7*np.pi/4, n_per_ring - n_per_ring // 2, endpoint=False),
+    ])
+
+    pts = []
+    for z in z_rings:
+        dz = z - z_bottom                                           #for every vertical height, calculate difference with bottom
+        ring_cx = bottom_cx + shift_per_height * dz                 #calculate shift in x xcoordinate of centroid bcs of tilt
+        ring_cy = bottom_cy                                         #calculate ycoordinate of centroid
+        x = ring_cx + R * np.cos(phi)                               #make circle
+        y = ring_cy + R * np.sin(phi)                               #make circle
+        zc = np.full(n_per_ring, z)                                 #make array of n_per_ring times the z coordinate
+        pts.append(np.column_stack([x, y, zc]))                     #add the points to the list
+
+    return np.vstack(pts)
 
 def _drone_array_points(stl_mesh,
                         bounds,
@@ -224,161 +268,115 @@ def sample(
     use_signed_distance=True,
     oversample_factor=4,
     max_random_iters=100,
-    drone_array_config=None,
+    config=None,
 ):
-    """
-    Sample CFD velocity + pressure at target points.
+    """Sample CFD velocity and pressure at target points, returning (df, bounds).
 
     method:
-        "CSV"          -- `samples` is a path to a CSV with x/y/z-coordinate
-                          columns (or the first three columns).
-        "array"        -- `samples` is an (N, 3) array of target coordinates.
-        "random"       -- scatter num_samples points through the domain,
-                          rejecting any that land inside / near the mesh.
-        "drone_array"  -- generate a tilted drone grid via _drone_array_points;
-                          pass generator kwargs through `drone_array_config`.
+        "CSV"          samples is a path to a CSV with x/y/z-coordinate columns.
+        "array"        samples is an (N, 3) array of coordinates.
+        "random"       scatter num_samples points, rejecting any inside/near the mesh.
+        "drone_array"  tilted drone grid from _drone_array_points.
+        "cylinder"     oblique cylindrical shell from _oblique_cylinder_points.
 
-    Returns (results_df, bounds).
+    Generator kwargs for "drone_array"/"cylinder" go through `config`.
     """
-    cfd_df = pd.read_csv(field_path)
-    cfd_df.columns = cfd_df.columns.str.strip()
+    cfd = pd.read_csv(field_path)
+    cfd.columns = cfd.columns.str.strip()
 
-    required_cols = [
+    required = [
         "x-coordinate", "y-coordinate", "z-coordinate",
         "x-velocity", "y-velocity", "z-velocity", "pressure",
     ]
-    missing = [c for c in required_cols if c not in cfd_df.columns]
+    missing = [c for c in required if c not in cfd.columns]
     if missing:
         raise ValueError(f"Missing required columns in CFD CSV: {missing}")
 
-    source_coords = cfd_df[
-        ["x-coordinate", "y-coordinate", "z-coordinate"]
-    ].values.astype(float)
-    source_values = cfd_df[
-        ["x-velocity", "y-velocity", "z-velocity", "pressure"]
-    ].values.astype(float)
+    source_coords = cfd[["x-coordinate", "y-coordinate", "z-coordinate"]].to_numpy(float)
+    source_values = cfd[["x-velocity", "y-velocity", "z-velocity", "pressure"]].to_numpy(float)
 
-    x_min, x_max = source_coords[:, 0].min(), source_coords[:, 0].max()
-    y_min, y_max = source_coords[:, 1].min(), source_coords[:, 1].max()
-    z_min, z_max = source_coords[:, 2].min(), source_coords[:, 2].max()
+    bounds = np.array([
+        [source_coords[:, 0].min(), source_coords[:, 0].max()],
+        [source_coords[:, 1].min(), source_coords[:, 1].max()],
+        [source_coords[:, 2].min(), source_coords[:, 2].max()],
+    ])
 
-    bounds = np.array(
-        [[x_min, x_max], [y_min, y_max], [z_min, z_max]], dtype=float
-    )
+    def reject(points):
+        return points[_mesh_reject_mask(
+            points, stl_mesh, epsilon=epsilon, use_signed_distance=use_signed_distance,
+        )]
 
-    # -------------------------------------------------------------------------
-    # Build target points
-    # -------------------------------------------------------------------------
     if method == "drone_array":
-        cfg = drone_array_config or {}
-        valid_points = _drone_array_points(stl_mesh, bounds, **cfg)
-        # Reject anything that landed inside / too close to the body.
-        valid_points = valid_points[
-            _mesh_reject_mask(valid_points, stl_mesh, epsilon=epsilon,
-                              use_signed_distance=use_signed_distance)
-        ]
-        if len(valid_points) == 0:
+        points = reject(_drone_array_points(stl_mesh, bounds, **(config or {})))
+        if len(points) == 0:
             raise RuntimeError("drone_array produced no valid points.")
 
+    elif method == "cylinder":
+        points = reject(_oblique_cylinder_points(stl_mesh, **(config or {})))
+        if len(points) == 0:
+            raise RuntimeError("cylinder produced no valid points.")
+
     elif method == "random":
-        rng_points = []
-        collected = 0
+        collected = []
+        n = 0
         for _ in range(max_random_iters):
-            if collected >= num_samples:
+            if n >= num_samples:
                 break
-            remaining = num_samples - collected
-            batch_size = max(remaining * oversample_factor, remaining)
-            batch = np.column_stack((
-                rnd.uniform(x_min, x_max, batch_size),
-                rnd.uniform(y_min, y_max, batch_size),
-                rnd.uniform(z_min, z_max, batch_size),
-            ))
-            safe = batch[
-                _mesh_reject_mask(batch, stl_mesh, epsilon=epsilon,
-                                  use_signed_distance=use_signed_distance)
-            ]
+            batch = np.column_stack([
+                rnd.uniform(bounds[0, 0], bounds[0, 1], num_samples * oversample_factor),
+                rnd.uniform(bounds[1, 0], bounds[1, 1], num_samples * oversample_factor),
+                rnd.uniform(bounds[2, 0], bounds[2, 1], num_samples * oversample_factor),
+            ])
+            safe = reject(batch)
             if len(safe):
-                rng_points.append(safe)
-                collected += len(safe)
-        if collected == 0:
+                collected.append(safe)
+                n += len(safe)
+        if not collected:
             raise RuntimeError("Random sampling failed: no valid points.")
-        valid_points = np.vstack(rng_points)[:num_samples]
+        points = np.vstack(collected)[:num_samples]
 
     elif method in ("CSV", "array"):
+        if samples is None:
+            raise ValueError(f"samples is required when method='{method}'.")
         if method == "CSV":
-            if samples is None:
-                raise ValueError("samples must be a CSV path when method='CSV'.")
-            target_df = pd.read_csv(samples)
-            target_df.columns = target_df.columns.str.strip()
-            if "x-coordinate" in target_df.columns:
-                target_points = target_df[
-                    ["x-coordinate", "y-coordinate", "z-coordinate"]
-                ].values.astype(float)
-            else:
-                target_points = target_df.iloc[:, :3].values.astype(float)
-        else:  # array
-            if samples is None:
-                raise ValueError("samples must be an array when method='array'.")
-            target_points = np.asarray(samples, dtype=float)
+            tdf = pd.read_csv(samples)
+            tdf.columns = tdf.columns.str.strip()
+            cols = ["x-coordinate", "y-coordinate", "z-coordinate"]
+            points = (tdf[cols] if cols[0] in tdf.columns else tdf.iloc[:, :3]).to_numpy(float)
+        else:
+            points = np.asarray(samples, dtype=float)
+        if points.ndim == 1:
+            points = points.reshape(1, -1)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError(f"points must have shape (N, 3), got {points.shape}")
 
-        if target_points.ndim == 1:
-            target_points = target_points.reshape(1, -1)
-        if target_points.ndim != 2 or target_points.shape[1] != 3:
-            raise ValueError(
-                f"target_points must have shape (N, 3), got {target_points.shape}"
-            )
-
-        bounds_mask = (
-            (target_points[:, 0] >= x_min) & (target_points[:, 0] <= x_max)
-            & (target_points[:, 1] >= y_min) & (target_points[:, 1] <= y_max)
-            & (target_points[:, 2] >= z_min) & (target_points[:, 2] <= z_max)
-        )
-        valid_points = target_points[bounds_mask]
-        if len(valid_points):
-            valid_points = valid_points[
-                _mesh_reject_mask(valid_points, stl_mesh, epsilon=epsilon,
-                                  use_signed_distance=use_signed_distance)
-            ]
-        if len(valid_points) == 0:
+        in_bounds = np.all((points >= bounds[:, 0]) & (points <= bounds[:, 1]), axis=1)
+        points = reject(points[in_bounds])
+        if len(points) == 0:
             raise ValueError("No points left to sample.")
 
     else:
-        raise ValueError(
-            "method must be 'CSV', 'array', 'random', or 'drone_array'."
-        )
+        raise ValueError(f"unknown method {method!r}")
 
-    # -------------------------------------------------------------------------
-    # Interpolate CFD values at target points
-    # -------------------------------------------------------------------------
-    interpolated_values = sp.interpolate.griddata(
-        points=source_coords,
-        values=source_values,
-        xi=valid_points,
-        method="linear",
-        fill_value=np.nan,
+    values = sp.interpolate.griddata(
+        source_coords, source_values, points, method="linear", fill_value=np.nan,
     )
 
     columns = [
         "x-target", "y-target", "z-target",
         "x-velocity", "y-velocity", "z-velocity", "pressure",
     ]
-    results_df = pd.DataFrame(
-        np.hstack((valid_points, interpolated_values)), columns=columns
-    )
+    df = pd.DataFrame(np.hstack([points, values]), columns=columns)
 
-    before = len(results_df)
-    results_df = results_df.dropna().reset_index(drop=True)
-    dropped = before - len(results_df)
+    before = len(df)
+    df = df.dropna().reset_index(drop=True)
 
-    print("\nSampling diagnostics")
-    print("--------------------")
-    print(f"CFD source points:          {len(source_coords)}")
-    print(f"Candidate valid points:     {before}")
-    print(f"Dropped after griddata NaN: {dropped}")
-    print(f"Returned samples:           {len(results_df)}")
-    print(f"Bounds:\n{bounds}")
+    print(f"CFD source points:    {len(source_coords)}")
+    print(f"Candidate points:     {before}")
+    print(f"Dropped (NaN):        {before - len(df)}")
+    print(f"Returned samples:     {len(df)}")
 
-    if len(results_df) == 0:
+    if len(df) == 0:
         raise RuntimeError("All sampled points became NaN after interpolation.")
 
-    return results_df, bounds
+    return df, bounds

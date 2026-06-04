@@ -132,7 +132,7 @@ def plot_multi_slices(result, n_slices=5, field="posterior", axis="z",
                       slice_range=(0.1, 6.5)):
     """Grid of |u| slices across several planes along the chosen axis.
 
-    field:       "posterior", "prior", or "cfd"
+    field:       "posterior", "variances", "prior", or "cfd"
     axis:        "x", "y", or "z"
     slice_range: (lo, hi) coordinate range along `axis` to sample slices
                  within; None spans the full bounds.
@@ -144,6 +144,7 @@ def plot_multi_slices(result, n_slices=5, field="posterior", axis="z",
     P = test_points.reshape(res, res, res, 3)
     field_map = {
         "posterior": "GPR_posterior",
+        "variances": "GPR_variances",
         "prior": "means_tests",
         "cfd": "cfd_test_vels",
     }
@@ -180,7 +181,8 @@ def plot_multi_slices(result, n_slices=5, field="posterior", axis="z",
             A, B, fld = P[:, k, :, other[0]], P[:, k, :, other[1]], mag[:, k, :]
         else:
             A, B, fld = P[k, :, :, other[0]], P[k, :, :, other[1]], mag[k, :, :]
-        pc = ax.contourf(A, B, fld, levels=levels, cmap="viridis", extend="both")
+        cmap = 'Reds' if field=='variances' else 'viridis'
+        pc = ax.contourf(A, B, fld, levels=levels, cmap=cmap, extend="both")
         ax.set_aspect("equal")
         ax.set_title(f"{axis}={grid[k]:.3g}")
         ax.set_xlabel(labels[other[0]])
@@ -232,11 +234,11 @@ def plot_pressure_slice(result, z_slice_target=2.5):
 
 
 def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
-    """Convenience: produce every figure."""
     figs = [
         plot_posterior_3d(result),
         plot_slice_comparison(result, z_slice_target),
         plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z"),
+        plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z")
     ]
     pf = plot_pressure_slice(result, z_slice_target)
     if pf is not None:

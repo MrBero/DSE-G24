@@ -28,9 +28,18 @@ from flowpanelwrapper import FLOWPanelSolver
 from sampling import sample
 
 from alive_progress import alive_bar
+import time
+import builtins
+
+#this might break prints so comment if bad
+_original_print = builtins.print
+
+def _print(*args, **kwargs):
+    _original_print(f"[{time.perf_counter():.3f}]   ", *args, **kwargs)
+
+builtins.print = _print
 
 # Kernelissimo Kernelismus
-
 def matern52_np(v1, v2, ell, var):
     """Scalar Matérn-5/2 covariance. v1,v2:(3,)  ell:(3,)  var:scalar."""
     diff = v2 - v1
@@ -54,7 +63,6 @@ def Hemholtz_K0(V1, V2, ell, var):
             [H[2, 0], H[2, 1], -H[0, 0] - H[1, 1]],
         ]
     )
-
 
 def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
     """
@@ -83,10 +91,7 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
 
 # Hyperparam fitting, the fun stuff
 def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, seed=0):
-    """
-    Maximum marginal likelihood fit of GP hyperparameters without physical heuristics.
-    Uses wide, generic log-space bounds [-11.5, 11.5] for all parameters.
-    """
+    
     X = jnp.asarray(train_coords)
     y = jnp.asarray(train_residuals).reshape(-1, 1)
     n = X.shape[0]
@@ -160,6 +165,29 @@ def posterior_mean_batched(test_points, training_coords, ell, var, alpha, means_
 
     return out.reshape(-1, 1)
 
+def posterior_vars_batched(test_points, training_coords, ell, var, beta,
+                           batch=300, progress_every=0):
+    test_points = np.asarray(test_points)
+    n_test = test_points.shape[0]
+    out = np.empty((n_test*3), dtype=float)
+    beta_local = jnp.asarray(beta)
+    n_chunks = (n_test + batch - 1) // batch
+
+    for ci, i in enumerate(range(0, n_test, batch)):
+        chunk = test_points[i:i+batch]
+        n_chunk = chunk.shape[0]
+
+        K_tests_slice = jnp.array(assemble_dat_shi(chunk, chunk, ell, var))
+        k_slice = jnp.array(assemble_dat_shi(chunk, training_coords, ell, var))
+        
+        beta_slice = np.array(beta[:, i*3:(i+batch)*3])
+        contrib = k_slice @ beta_slice
+        out[i*3:(i + batch)*3] = jnp.diag(K_tests_slice - contrib)
+        if progress_every and (ci % progress_every == 0 or ci == n_chunks - 1):
+            print(f"    posterior chunk {ci + 1}/{n_chunks}", flush=True)
+    print(out)
+    return out
+
 
 # =============================================================================
 # Small helpers
@@ -210,17 +238,6 @@ def predict_batched(estimator, test_points, batch=4000):
 def ts():
     return time.perf_counter()
 
-@contextmanager
-def _stage(name, verbose):
-    """Print 'name ...' then 'name done in Xs' around a block when verbose."""
-    if verbose:
-        print(f"[ ] {name} ...", flush=True)
-    t0 = time.perf_counter()
-    yield
-    if verbose:
-        print(f"[x] {name} done in {time.perf_counter() - t0:.3f}s", flush=True)
-
-
 # =============================================================================
 # Callable pipeline
 # =============================================================================
@@ -253,18 +270,16 @@ def run_gpr(
             f"batch={posterior_batch}, n_restarts={n_restarts}, "
             f"fit_pressure={fit_pressure}\n", flush=True)
 
-    with alive_bar(8, dual_line=True) as bar:
+    with alive_bar(8, dual_line=True, enrich_print=False) as bar:
         bar.text('Loading...')
         # --- Mesh ---
-        with _stage("load + scale mesh", verbose):
-            stl_mesh = trimesh.load_mesh(stl_filepath)
-            if stl_scale != 1.0:
-                stl_mesh.apply_scale(stl_scale)
+        stl_mesh = trimesh.load_mesh(stl_filepath)
+        if stl_scale != 1.0:
+            stl_mesh.apply_scale(stl_scale)
 
         # --- Panel solver (prior) ---
-        with _stage("build panel solver", verbose):
-            solver = FLOWPanelSolver(stl_mesh, v_inf, julia_script="FP.jl",
-                                    julia_bin="julia", verbose=False)
+        solver = FLOWPanelSolver(stl_mesh, v_inf, julia_script="FP.jl",
+                                julia_bin="julia", verbose=False)
 
         def prior_fn(pts):
             return solver.velocity(np.asarray(pts), blank_interior=False).reshape(-1, 3)
@@ -272,12 +287,11 @@ def run_gpr(
 
         bar.text('Sampling...')
         # --- Sample training data ---
-        with _stage("sample training data", verbose):
-            ground_truth, bounds = sample(
-            cfd_filepath, stl_mesh, method="drone_array",
-            epsilon=0.02, use_signed_distance=True,
-            drone_array_config={"tilt_deg": 30, "n_rows": 10, "n_cols": 10},
-            )
+        ground_truth, bounds = sample(
+        cfd_filepath, stl_mesh, method="drone_array",
+        epsilon=0.02, use_signed_distance=True,
+        config={"tilt_deg": 30, "n_rows": 10, "n_cols": 10},
+        )
 
         bar.text('Training points...')
         training_coords = ground_truth[["x-target", "y-target", "z-target"]].to_numpy()
@@ -289,30 +303,28 @@ def run_gpr(
 
         bar.text('Test points...')
         # --- Test grid ---
-        with _stage("build test grid", verbose):
-            gx = np.linspace(bounds[0, 0], bounds[0, 1], res)
-            gy = np.linspace(bounds[1, 0], bounds[1, 1], res)
-            gz = np.linspace(bounds[2, 0], bounds[2, 1], res)
-            x, y, z = np.meshgrid(gx, gy, gz, indexing="ij")
-            test_points = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
-            del x, y, z
-        print(f'testing points: {test_points}')
+        gx = np.linspace(bounds[0, 0], bounds[0, 1], res)
+        gy = np.linspace(bounds[1, 0], bounds[1, 1], res)
+        gz = np.linspace(bounds[2, 0], bounds[2, 1], res)
+        x, y, z = np.meshgrid(gx, gy, gz, indexing="ij")
+        test_points = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
+        del x, y, z
+        print(f'testing points: {test_points.shape[0]}')
         bar()
 
-        bar.text('Computing prior means (potential flow solver in Julia)')
+        bar.text('Computing prior means (potential flow solver in Julia)...')
         # --- Prior mean (panel solver), streamed over the grid ---
         n_test = test_points.shape[0]
         n_chunks = (n_test + posterior_batch - 1) // posterior_batch
-        with _stage(f"prior mean over grid ({n_chunks} chunks)", verbose):
-            means_tests = np.empty((n_test, 3), dtype=float)
-            # for ci, i in enumerate(range(0, n_test, posterior_batch)):
-            #     chunk = test_points[i:i + posterior_batch]
-            means_tests = solver.velocity(test_points, blank_interior=True).reshape(-1, 3)
-                # if (ci % 50 == 0 or ci == n_chunks - 1):
-                #     print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
+        means_tests = np.empty((n_test, 3), dtype=float)
+        for ci, i in enumerate(range(0, n_test, posterior_batch)):
+            chunk = test_points[i:i + posterior_batch]
+            means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
+            if (ci % 50 == 0 or ci == n_chunks - 1):
+                print(f"variances chunk {ci + 1}/{n_chunks}", flush=True)
 
-        with _stage("prior mean at training points", verbose):
-            means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
+        
+        means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
         if np.isnan(means_training).any():
             raise RuntimeError("NaNs in direct prior mean at training points.")
         means_training = means_training.reshape(-1, 1)
@@ -323,11 +335,11 @@ def run_gpr(
         bar.text('Fit hyperparameters')
         # --- Fit GP to residuals ---
         residuals = training_vels - means_training
+
         if np.isnan(residuals).any():
             raise RuntimeError("NaNs in residuals_for_fit.")
 
-        with _stage(f"fit hyperparameters ({n_restarts} restarts)", verbose):
-            fit = fit_hyperparams(training_coords, residuals, n_restarts=n_restarts, jitter=1e-6, seed=0)
+        fit = fit_hyperparams(training_coords, residuals, n_restarts=n_restarts, jitter=1e-6, seed=0)
         
         print(f"    nll={fit['nll']:.6g}  ell={fit['ell']}  "
             f"var={fit['var']:.4g}  noise={fit['noise']:.4g}", flush=True)
@@ -337,23 +349,27 @@ def run_gpr(
         noise = float(fit["noise"])
         bar()
 
-        bar.text('Solving for alpha...')
+        bar.text('Assemble K + cholesky solve (invert K) at residuals and K(X_train, X_test)...')
         # --- Solve for alpha, build posterior ---
-        with _stage("assemble K + cholesky solve", verbose):
-            K = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=noise, jitter=1e-8)
-            c, low = cho_factor(K)
-            alpha = cho_solve((c, low), jnp.asarray(residuals))
+        K = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=noise, jitter=1e-8)
+        c, low = cho_factor(K)
+        alpha = cho_solve((c, low), jnp.asarray(residuals)) #inverted K matrix times residuals is alpha
+        K_test = assemble_dat_shi(test_points, training_coords, ell, var)
+        beta = cho_solve((c, low), jnp.asarray(K_test.T))
         bar()
 
-        bar.text('Calculating GPR Posterior...')
-        with _stage(f"velocity posterior over grid ({n_chunks} chunks)", verbose):
-            GPR_posterior = posterior_mean_batched(
-                test_points, training_coords, ell, var, alpha, means_tests,
-                batch=posterior_batch, progress_every=50,
-            )
-            GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
+        bar.text(f"Velocity posterior over grid ({n_chunks} chunks)...")
+        GPR_posterior = posterior_mean_batched(
+            test_points, training_coords, ell, var, alpha, means_tests,
+            batch=posterior_batch, progress_every=50)
+        GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
-        # Training reconstruction check.
+        bar.text(f"Variance posterior over grid ({n_chunks} chunks)...")
+        GPR_variances = posterior_vars_batched(test_points, training_coords, ell, var, beta,
+                                               batch=posterior_batch, progress_every=50)
+        GPR_variances = np.array(GPR_variances).reshape(-1, 3)
+
+        # Training reconstruction check
         K_signal = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=0.0, jitter=0.0)
         train_post = jnp.asarray(means_training) + K_signal @ alpha
         posterior_train_rmse = rmse(np.array(train_post), training_vels)
@@ -361,11 +377,9 @@ def run_gpr(
 
         bar.text('Interpolating truth for comparison...')
         # --- CFD truth on test grid (velocity + pressure in one griddata pass) ---
-        with _stage("interpolate CFD truth (build triangulation + query)", verbose):
-            cfd_test = interpolate_cfd_to_points(
-                cfd_filepath, test_points,
-                ["x-velocity", "y-velocity", "z-velocity", "pressure"],
-            )
+        cfd_test = interpolate_cfd_to_points(
+            cfd_filepath, test_points,
+            ["x-velocity", "y-velocity", "z-velocity", "pressure"])
         cfd_test_vels = cfd_test[:, :3]
         cfd_p = cfd_test[:, 3]
 
@@ -381,21 +395,18 @@ def run_gpr(
         pressure_posterior = None
         pressure_test_rmse = None
         if fit_pressure:
-            with _stage("fit pressure GPR (sklearn)", verbose):
-                train_p = ground_truth["pressure"].to_numpy()
-                p_kernel = Matern(
-                    length_scale=[1.0, 1.0, 1.0], 
-                    length_scale_bounds=(1e-2, 1e2), 
-                    nu=2.5
-                )
+            train_p = ground_truth["pressure"].to_numpy()
+            p_kernel = Matern(
+                length_scale=[1.0, 1.0, 1.0], 
+                length_scale_bounds=(1e-2, 1e2), 
+                nu=2.5)
                 
-                p_gpr = GaussianProcessRegressor(
-                    kernel=p_kernel, normalize_y=True, n_restarts_optimizer=8, random_state=0,
-                ).fit(training_coords, train_p)
+            p_gpr = GaussianProcessRegressor(
+                kernel=p_kernel, normalize_y=True, n_restarts_optimizer=8, random_state=0,
+            ).fit(training_coords, train_p)
             print(f"fitted kernel: {p_gpr.kernel_}", flush=True)
 
-            with _stage(f"pressure posterior over grid ({n_chunks} chunks)", verbose):
-                pressure_posterior = predict_batched(p_gpr, test_points, batch=posterior_batch)
+            pressure_posterior = predict_batched(p_gpr, test_points, batch=posterior_batch)
 
             valid_p = ~np.isnan(cfd_p)
             pressure_test_rmse = rmse(pressure_posterior[valid_p], cfd_p[valid_p])
@@ -423,6 +434,7 @@ def run_gpr(
         "res": res,
         "means_tests": means_tests,
         "GPR_posterior": GPR_posterior,
+        "GPR_variances": GPR_variances,
         "cfd_test_vels": cfd_test_vels,
         "pressure_posterior": pressure_posterior,
         "training_coords": training_coords,
