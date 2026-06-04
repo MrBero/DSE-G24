@@ -281,6 +281,153 @@ def rmse(a, b):
 def velocity_magnitude(U):
     return np.sqrt(np.sum(U ** 2, axis=-1))
 
+def plot_sampling_layout(
+    stl_mesh,
+    samples_df,
+    bounds,
+    wind_direction,
+    savepath="sampling_layout.png",
+    title="Training sample layout",
+):
+    """Plot where the selected training measurements are, colored by group."""
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    coords = samples_df[
+        ["x-target", "y-target", "z-target"]
+    ].to_numpy(float)
+
+    if "sample-group" in samples_df.columns:
+        groups = samples_df["sample-group"].astype(str).to_numpy()
+    else:
+        groups = np.full(len(coords), "training samples", dtype=object)
+
+    group_order = [
+        "wake core",
+        "wake shear",
+        "wake recovery",
+        "near-body guards",
+        "freestream anchors",
+        "cv windward face",
+        "cv leeward face",
+        "cv side/top faces",
+        "separation guards",
+        "upstream anchors",
+        "separation shell",
+        "wake",
+        "windward/edge",
+        "upstream",
+        "wake fill",
+        "drone-safe fill",
+        "domain fill",
+        "training samples",
+    ]
+    colors = {
+        "wake core": "#2f80ed",
+        "wake shear": "#00d4ff",
+        "wake recovery": "#8e5cf7",
+        "near-body guards": "#ff9f1c",
+        "freestream anchors": "#06d6a0",
+        "cv windward face": "#ff5c5c",
+        "cv leeward face": "#a855f7",
+        "cv side/top faces": "#ffd166",
+        "separation guards": "#f72585",
+        "upstream anchors": "#06d6a0",
+        "separation shell": "#ff5c5c",
+        "wake": "#2f80ed",
+        "windward/edge": "#ffd166",
+        "upstream": "#06d6a0",
+        "wake fill": "#7aa6ff",
+        "drone-safe fill": "#b388ff",
+        "domain fill": "#8d99ae",
+        "training samples": "#ff5c5c",
+    }
+
+    present = [g for g in group_order if np.any(groups == g)]
+    present += sorted(set(groups) - set(present))
+
+    fig = plt.figure(figsize=(15, 6), constrained_layout=True)
+    ax3d = fig.add_subplot(1, 2, 1, projection="3d")
+    axxy = fig.add_subplot(1, 2, 2)
+
+    tris = np.asarray(stl_mesh.triangles)
+    mesh_collection = Poly3DCollection(
+        tris,
+        facecolor=(0.55, 0.55, 0.55, 0.22),
+        edgecolor=(0.05, 0.05, 0.05, 0.35),
+        linewidth=0.25,
+    )
+    ax3d.add_collection3d(mesh_collection)
+
+    for group in present:
+        mask = groups == group
+        count = int(mask.sum())
+        pct = 100.0 * count / max(len(coords), 1)
+        label = f"{group}: {count} ({pct:.1f}%)"
+        color = colors.get(group, "#ffffff")
+        ax3d.scatter(
+            coords[mask, 0],
+            coords[mask, 1],
+            coords[mask, 2],
+            s=32,
+            color=color,
+            edgecolor="black",
+            linewidth=0.35,
+            depthshade=False,
+            label=label,
+        )
+        axxy.scatter(
+            coords[mask, 0],
+            coords[mask, 1],
+            s=32,
+            color=color,
+            edgecolor="black",
+            linewidth=0.35,
+            label=label,
+        )
+
+    verts = np.asarray(stl_mesh.vertices)
+    axxy.scatter(verts[:, 0], verts[:, 1], c="0.6", s=6, alpha=0.8)
+
+    center = coords.mean(axis=0)
+    flow = np.asarray(wind_direction, dtype=float)
+    flow_norm = np.linalg.norm(flow)
+    if flow_norm > 0:
+        flow = flow / flow_norm
+        arrow_len = 0.15 * (bounds[0, 1] - bounds[0, 0])
+        axxy.arrow(
+            center[0],
+            bounds[1, 0] + 0.12 * (bounds[1, 1] - bounds[1, 0]),
+            arrow_len * flow[0],
+            arrow_len * flow[1],
+            color="white",
+            width=0.035,
+            head_width=0.35,
+            length_includes_head=True,
+        )
+
+    ax3d.set_title(title)
+    ax3d.set_xlabel("x")
+    ax3d.set_ylabel("y")
+    ax3d.set_zlabel("z")
+    ax3d.set_xlim(bounds[0])
+    ax3d.set_ylim(bounds[1])
+    ax3d.set_zlim(bounds[2])
+    ax3d.set_box_aspect(bounds[:, 1] - bounds[:, 0])
+
+    axxy.set_title(f"{title}, top view")
+    axxy.set_xlabel("x")
+    axxy.set_ylabel("y")
+    axxy.set_xlim(bounds[0])
+    axxy.set_ylim(bounds[1])
+    axxy.set_aspect("equal", adjustable="box")
+    axxy.grid(alpha=0.18)
+
+    ax3d.legend(loc="upper left", fontsize=8)
+    axxy.legend(loc="upper right", fontsize=8)
+    fig.savefig(savepath, dpi=160, bbox_inches="tight")
+    print(f"\nSampling layout figure saved to: {savepath}")
+    return fig
+
 def interpolate_cfd_velocity_to_points(cfd_filepath, query_points):
     cfd_df = pd.read_csv(cfd_filepath)
     cfd_df.columns = cfd_df.columns.str.strip()
@@ -343,6 +490,103 @@ def posterior_mean_batched(
 
     return out.reshape(-1, 1)
 
+
+def plot_flow_reconstruction_slice(
+    method_name,
+    stl_mesh,
+    bounds,
+    res,
+    test_points,
+    prior_values,
+    posterior_values,
+    cfd_values,
+    training_coords,
+    z_slice_target,
+    savepath,
+):
+    """Save a CFD/prior/posterior slice comparison for one sampling method."""
+    verts = np.asarray(stl_mesh.vertices)
+    P = test_points.reshape(res, res, res, 3)
+
+    prior_U = prior_values.reshape(res, res, res, 3)
+    post_U = posterior_values.reshape(res, res, res, 3)
+    cfd_U = cfd_values.reshape(res, res, res, 3)
+
+    z_grid = np.linspace(bounds[2, 0], bounds[2, 1], res)
+    k = int(np.argmin(np.abs(z_grid - z_slice_target)))
+    z_here = z_grid[k]
+
+    print(f"\nPlotting {method_name} xy slices at z={z_here:.6g}")
+
+    Xs = P[:, :, k, 0]
+    Ys = P[:, :, k, 1]
+
+    prior_mag = velocity_magnitude(prior_U[:, :, k, :])
+    post_mag = velocity_magnitude(post_U[:, :, k, :])
+    cfd_mag = velocity_magnitude(cfd_U[:, :, k, :])
+
+    slice_tol = 0.5 * abs(z_grid[1] - z_grid[0]) if res > 1 else 1e-6
+    near_slice = np.abs(verts[:, 2] - z_here) <= slice_tol
+    sample_near_slice = np.abs(training_coords[:, 2] - z_here) <= slice_tol
+
+    print(f"Mesh vertices near slice: {near_slice.sum()} / {len(verts)}")
+    print(
+        f"{method_name} training samples near slice: "
+        f"{sample_near_slice.sum()} / {len(training_coords)}"
+    )
+
+    prior_err = prior_mag - cfd_mag
+    post_err = post_mag - cfd_mag
+
+    fig_cfd, axs = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
+
+    mag_vmin = np.nanmin([cfd_mag, prior_mag, post_mag])
+    mag_vmax = np.nanmax([cfd_mag, prior_mag, post_mag])
+    err_lim = np.nanmax(np.abs([prior_err, post_err]))
+    pp_lim = np.nanmax(np.abs(post_mag - prior_mag))
+
+    plot_items = [
+        (axs[0, 0], cfd_mag, "CFD truth |u|", "viridis", mag_vmin, mag_vmax),
+        (axs[0, 1], prior_mag, "Prior |u|", "viridis", mag_vmin, mag_vmax),
+        (axs[0, 2], post_mag, "Posterior |u|", "viridis", mag_vmin, mag_vmax),
+        (
+            axs[1, 0],
+            post_mag - prior_mag,
+            "Posterior - Prior |u|",
+            "coolwarm",
+            -pp_lim,
+            pp_lim,
+        ),
+        (axs[1, 1], prior_err, "Prior - CFD |u|", "coolwarm", -err_lim, err_lim),
+        (axs[1, 2], post_err, "Posterior - CFD |u|", "coolwarm", -err_lim, err_lim),
+    ]
+
+    for ax, field, title, cmap, lo, hi in plot_items:
+        pc = ax.contourf(Xs, Ys, field, levels=30, cmap=cmap, vmin=lo, vmax=hi)
+        fig_cfd.colorbar(pc, ax=ax)
+
+        if near_slice.any():
+            ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
+        if sample_near_slice.any():
+            ax.scatter(
+                training_coords[sample_near_slice, 0],
+                training_coords[sample_near_slice, 1],
+                c="white",
+                s=18,
+                marker="x",
+                linewidth=0.8,
+            )
+
+        ax.set_aspect("equal")
+        ax.set_title(f"{method_name}: {title}, z={z_here:.4g}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+
+    fig_cfd.savefig(savepath, dpi=160, bbox_inches="tight")
+    print(f"Flow reconstruction figure saved to: {savepath}")
+    return fig_cfd
+
+
 def main():
     # -------------------------------------------------------------------------
     # User settings
@@ -354,13 +598,17 @@ def main():
     # If STL is already in m, use 1.0.
     STL_SCALE = 1.0 / 1000.0
 
-    training_point_n_requested = 150
+    training_point_n_requested = 120
+    RECONSTRUCTION_METHODS = ("wake_rmse", "force_cv")
     res = 100
 
     # Memory control: chunk size for streaming the posterior over test points.
     posterior_batch = 4000
 
     V_inf = np.array([12.0, 0.0, 0.0])
+    julia_bin = os.path.abspath(
+        os.path.join(".tools", "julia-1.10.11", "bin", "julia.exe")
+    )
 
     # Plot slice through object, not the middle of the full CFD box.
     z_slice_target = 2.5
@@ -387,6 +635,14 @@ def main():
     print(f"bounds:\n{stl_mesh.bounds}")
     print(f"extents: {stl_mesh.extents}")
 
+    try:
+        stl_mesh.contains(np.asarray(stl_mesh.bounds).mean(axis=0).reshape(1, 3))
+    except Exception as exc:
+        raise RuntimeError(
+            "Mesh interior masking requires trimesh's contains() query. "
+            "Install the missing spatial-index dependency with: pip install rtree"
+        ) from exc
+
     # -------------------------------------------------------------------------
     # Build the panel solver FIRST so it can act as the sampling prior.
     # -------------------------------------------------------------------------
@@ -394,7 +650,7 @@ def main():
         stl_mesh,
         V_inf,
         julia_script="FP.jl",
-        julia_bin="julia",
+        julia_bin=julia_bin,
         verbose=True,
     )
 
@@ -405,29 +661,83 @@ def main():
         ).reshape(-1, 3)
 
     # -------------------------------------------------------------------------
-    # Sample training data (residual-adaptive CV sampling around the body)
+    # Sample and plot each reconstruction objective.
     # -------------------------------------------------------------------------
-    ground_truth, bounds = sample(
-        cfd_filepath,
-        stl_mesh,
-        method="cv",
-        num_samples=training_point_n_requested,
-        epsilon=0.02,
-        use_signed_distance=True,
-        max_points=150,
-        prior_fn=prior_fn,
-    )
+    training_sets = {}
+    bounds = None
 
-    training_coords = ground_truth[
-        ["x-target", "y-target", "z-target"]
-    ].to_numpy()
+    for method_name in RECONSTRUCTION_METHODS:
+        print(f"\nPreparing sampling strategy: {method_name}")
+        print("=" * (29 + len(method_name)))
 
-    training_vels_matrix = ground_truth[
-        ["x-velocity", "y-velocity", "z-velocity"]
-    ].to_numpy()
+        ground_truth, method_bounds = sample(
+            cfd_filepath,
+            stl_mesh,
+            method=method_name,
+            num_samples=training_point_n_requested,
+            epsilon=0.02,
+            use_signed_distance=True,
+            max_points=120,
+            wind_direction=V_inf,
+            shell_offsets=(0.50, 0.75, 1.00),
+            min_drone_clearance=0.50,
+            min_measurement_spacing=0.50,
+            prior_fn=prior_fn,
+        )
 
-    training_vels = training_vels_matrix.reshape(-1, 1)
-    training_point_n = len(ground_truth)
+        if bounds is None:
+            bounds = method_bounds
+        elif not np.allclose(bounds, method_bounds):
+            raise RuntimeError(
+                f"CFD bounds changed between sampling methods: "
+                f"{bounds} vs {method_bounds}"
+            )
+
+        training_coords = ground_truth[
+            ["x-target", "y-target", "z-target"]
+        ].to_numpy()
+        training_vels_matrix = ground_truth[
+            ["x-velocity", "y-velocity", "z-velocity"]
+        ].to_numpy()
+        training_vels = training_vels_matrix.reshape(-1, 1)
+        training_point_n = len(ground_truth)
+
+        print(f"\n{method_name} requested training points: {training_point_n_requested}")
+        print(f"{method_name} actual training points:    {training_point_n}")
+
+        try:
+            inside_training = stl_mesh.contains(training_coords)
+            print(
+                f"{method_name} training points inside mesh: "
+                f"{inside_training.sum()} / {training_point_n}"
+            )
+        except Exception as exc:
+            print(f"Could not check {method_name} training points inside mesh: {exc}")
+
+        print_vector_stats(f"{method_name} training_coords", training_coords)
+        print_vector_stats(f"{method_name} training_vels_matrix", training_vels_matrix)
+
+        if training_point_n == 0:
+            raise RuntimeError(f"No training points were sampled for {method_name}.")
+
+        fig = plot_sampling_layout(
+            stl_mesh,
+            ground_truth,
+            bounds,
+            V_inf,
+            savepath=f"sampling_layout_{method_name}.png",
+            title=f"{method_name} sampling",
+        )
+        if method_name == RECONSTRUCTION_METHODS[-1]:
+            fig.savefig("sampling_layout.png", dpi=160, bbox_inches="tight")
+            print("Sampling layout figure saved to: sampling_layout.png")
+
+        training_sets[method_name] = {
+            "ground_truth": ground_truth,
+            "training_coords": training_coords,
+            "training_vels_matrix": training_vels_matrix,
+            "training_vels": training_vels,
+        }
 
     print("\nCFD bounds")
     print("----------")
@@ -440,21 +750,6 @@ def main():
     print(f"CFD extents:  {bounds[:, 1] - bounds[:, 0]}")
     with np.errstate(divide="ignore", invalid="ignore"):
         print(f"CFD / mesh extent ratio: {(bounds[:, 1] - bounds[:, 0]) / stl_mesh.extents}")
-
-    print(f"\nRequested training points: {training_point_n_requested}")
-    print(f"Actual training points:    {training_point_n}")
-
-    try:
-        inside_training = stl_mesh.contains(training_coords)
-        print(f"Training points inside mesh: {inside_training.sum()} / {training_point_n}")
-    except Exception as exc:
-        print(f"Could not check training points inside mesh: {exc}")
-
-    print_vector_stats("training_coords", training_coords)
-    print_vector_stats("training_vels_matrix", training_vels_matrix)
-
-    if training_point_n == 0:
-        raise RuntimeError("No training points were sampled.")
 
     # -------------------------------------------------------------------------
     # Build test grid
@@ -481,236 +776,216 @@ def main():
         x, y, z, zero_inside=True,
     )
 
-    means_tests = potential_flow_field.reshape(-1, 3)
-
-    # Direct evaluation at training points. Do not interpolate from test grid.
-    means_training_matrix = surface_source_solver.velocity(
-        training_coords, blank_interior=False,
-    ).reshape(-1, 3)
-
-    if np.isnan(means_training_matrix).any():
-        raise RuntimeError(
-            f"NaNs in direct prior mean at training points: "
-            f"{np.isnan(means_training_matrix).sum()}"
-        )
-
-    means_training = means_training_matrix.reshape(-1, 1)
+    means_tests_base = potential_flow_field.reshape(-1, 3)
+    inside_test = stl_mesh.contains(test_points)
+    means_tests_base[inside_test] = 0.0
 
     tock = time.perf_counter()
     print(f"\nPrior means (julia script) calculated in: {tock - tick:.3f}s")
-
-    print_vector_stats("means_training", means_training)
-
-    prior_train_rmse = rmse(means_training, training_vels)
-    data_rms = float(np.sqrt(np.mean(training_vels ** 2)))
-
-    print("\nPrior quality at training points")
-    print("--------------------------------")
-    print(f"Prior RMSE:          {prior_train_rmse:.6g}")
-    print(f"Training data RMS:   {data_rms:.6g}")
-    print(f"Relative prior RMSE: {prior_train_rmse / max(data_rms, 1e-12):.6g}")
-
-    # -------------------------------------------------------------------------
-    # Fit GP to residuals
-    # -------------------------------------------------------------------------
-    residuals_for_fit = training_vels - means_training
-
-    if np.isnan(residuals_for_fit).any():
-        raise RuntimeError(
-            f"NaNs in residuals_for_fit: {np.isnan(residuals_for_fit).sum()}"
-        )
-
-    print_vector_stats("residuals_for_fit", residuals_for_fit)
-
-    tick = time.perf_counter()
-    fit = fit_hyperparams(
-        training_coords,
-        residuals_for_fit,
-        n_restarts=6,
-        jitter=1e-6,
-        seed=0,
+    print(
+        f"Zeroed prior velocity inside mesh: "
+        f"{inside_test.sum()} / {len(inside_test)} test points"
     )
-    tock = time.perf_counter()
-
-    print(f"\nHyperparameter fitting complete in {tock - tick:.3f}s")
-    # print(f"fit: {fit}")
-
-    ell = jnp.asarray(fit["ell"])
-    var = float(fit["var"])
-    noise = float(fit["noise"])
-
-    dx_test = (bounds[:, 1] - bounds[:, 0]) / (res - 1)
-
-    print("\nLengthscales")
-    print("------------------------")
-    print(f"Test grid spacing: {dx_test}")
-    print(f"Fitted ell:        {fit['ell']}")
-    print(f"ell / dx_test:     {fit['ell'] / dx_test}")
-    print(f"Sample spacing:    {fit.get('sample_spacing', np.nan)}")
-
-    # -------------------------------------------------------------------------
-    # Assemble training covariance and solve for alpha
-    # -------------------------------------------------------------------------
-    tick = time.perf_counter()
-    K_matrix = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=noise, jitter=1e-8)
-    tock = time.perf_counter()
-
-    print(f"\nK_matrix assembled in {tock - tick:.3f}s")
-    print(f"K_matrix shape: {K_matrix.shape}")
-
-    residuals = jnp.asarray(training_vels - means_training).reshape(-1, 1)
-    c, low = cho_factor(K_matrix)
-    alpha = cho_solve((c, low), residuals)
-
-    tick = time.perf_counter()
-    GPR_posterior = posterior_mean_batched(test_points, training_coords, ell, var, alpha, means_tests, batch=posterior_batch)
-    tock = time.perf_counter()
-
-    print(f"\nGPR posterior generated in {tock - tick:.3f}s")
-    print(f"GPR_posterior shape: {GPR_posterior.shape}")
-
-    GPR_posterior_reshaped = np.array(GPR_posterior).reshape(-1, 3)
-
-    print("\nTraining reconstruction check")
-    print("-----------------------------")
-
-    K_train_signal = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=0.0, jitter=0.0)
-
-    train_posterior = jnp.asarray(means_training) + K_train_signal @ alpha
-
-    posterior_train_rmse = rmse(np.array(train_posterior), training_vels)
-
-    print(f"Prior train RMSE:     {prior_train_rmse:.6g}")
-    print(f"Posterior train RMSE: {posterior_train_rmse:.6g}")
-    print(f"Fitted ell:           {fit['ell']}")
-    print(f"Fitted var:           {fit['var']:.6g}")
-    print(f"Fitted noise:         {fit['noise']:.6g}")
 
     print("\nInterpolating CFD truth onto test grid...")
     cfd_test_vels = interpolate_cfd_velocity_to_points(cfd_filepath, test_points)
+    cfd_test_vels[inside_test] = np.nan
 
-    valid_cfd = ~np.any(np.isnan(cfd_test_vels), axis=1)
-
-    prior_test = means_tests[valid_cfd]
-    post_test = GPR_posterior_reshaped[valid_cfd]
+    valid_cfd = (~np.any(np.isnan(cfd_test_vels), axis=1)) & (~inside_test)
     truth_test = cfd_test_vels[valid_cfd]
-
-    prior_test_rmse = rmse(prior_test, truth_test)
-    post_test_rmse = rmse(post_test, truth_test)
     truth_test_rms = float(np.sqrt(np.mean(truth_test ** 2)))
+    dx_test = (bounds[:, 1] - bounds[:, 0]) / (res - 1)
 
-    print("\nTest-grid CFD comparison")
-    print("------------------------")
-    print(f"Valid CFD test points:        {valid_cfd.sum()} / {len(valid_cfd)}")
-    print(f"Prior test RMSE:              {prior_test_rmse:.6g}")
-    print(f"Posterior test RMSE:          {post_test_rmse:.6g}")
-    print(f"Truth test RMS:               {truth_test_rms:.6g}")
-    print(f"Relative prior test RMSE:     {prior_test_rmse / max(truth_test_rms, 1e-12):.6g}")
-    print(f"Relative posterior test RMSE: {post_test_rmse / max(truth_test_rms, 1e-12):.6g}")
-    
-    GPR_vel_mags = np.sqrt(np.sum(GPR_posterior_reshaped ** 2, axis=1))
+    print("\nCommon test-grid CFD data")
+    print("-------------------------")
+    print(f"Valid CFD test points: {valid_cfd.sum()} / {len(valid_cfd)}")
+    print(f"Truth test RMS:        {truth_test_rms:.6g}")
+    print(f"Test grid spacing:     {dx_test}")
 
-    print_vector_stats("GPR_posterior_reshaped", GPR_posterior_reshaped)
-    print_vector_stats("GPR_vel_mags", GPR_vel_mags)
+    reconstruction_summaries = []
 
-    fig1 = plt.figure(figsize=(9, 7))
-    ax1 = fig1.add_subplot(projection="3d")
+    for method_name, data in training_sets.items():
+        print(f"\nRunning GPR reconstruction: {method_name}")
+        print("=" * (28 + len(method_name)))
 
-    sc = ax1.scatter3D(test_points[:, 0], test_points[:, 1], test_points[:, 2], c=GPR_vel_mags, alpha=0.2, s=4)
+        training_coords = data["training_coords"]
+        training_vels = data["training_vels"]
 
-    fig1.colorbar(sc, ax=ax1, label="|velocity|")
+        means_training_matrix = surface_source_solver.velocity(
+            training_coords, blank_interior=False,
+        ).reshape(-1, 3)
 
-    verts = surface_source_solver.mesh.vertices
+        if np.isnan(means_training_matrix).any():
+            raise RuntimeError(
+                f"NaNs in direct prior mean at {method_name} training points: "
+                f"{np.isnan(means_training_matrix).sum()}"
+            )
 
-    ax1.scatter3D(verts[:, 0], verts[:, 1], verts[:, 2], c="black", s=4)
+        means_training = means_training_matrix.reshape(-1, 1)
+        print_vector_stats(f"{method_name} means_training", means_training)
 
-    # Overlay actual training sample locations.
-    ax1.scatter3D(training_coords[:, 0], training_coords[:, 1], training_coords[:, 2], c="red", s=18, depthshade=False, label="training samples")
-    ax1.legend()
+        prior_train_rmse = rmse(means_training, training_vels)
+        data_rms = float(np.sqrt(np.mean(training_vels ** 2)))
 
-    ax1.set_title("GPR posterior velocity magnitude")
-    ax1.set_xlabel("x")
-    ax1.set_ylabel("y")
-    ax1.set_zlabel("z")
-    ax1.set_aspect("equal")
+        print(f"\n{method_name} prior quality at training points")
+        print("-" * (len(method_name) + 33))
+        print(f"Prior RMSE:          {prior_train_rmse:.6g}")
+        print(f"Training data RMS:   {data_rms:.6g}")
+        print(f"Relative prior RMSE: {prior_train_rmse / max(data_rms, 1e-12):.6g}")
 
-    P = test_points.reshape(res, res, res, 3)
+        residuals_for_fit = training_vels - means_training
+        if np.isnan(residuals_for_fit).any():
+            raise RuntimeError(
+                f"NaNs in {method_name} residuals_for_fit: "
+                f"{np.isnan(residuals_for_fit).sum()}"
+            )
+        print_vector_stats(f"{method_name} residuals_for_fit", residuals_for_fit)
 
-    prior_U = means_tests.reshape(res, res, res, 3)
-    post_U = GPR_posterior_reshaped.reshape(res, res, res, 3)
-    cfd_U = cfd_test_vels.reshape(res, res, res, 3)
+        tick = time.perf_counter()
+        fit = fit_hyperparams(
+            training_coords,
+            residuals_for_fit,
+            n_restarts=6,
+            jitter=1e-6,
+            seed=0,
+        )
+        tock = time.perf_counter()
 
-    z_grid = np.linspace(bounds[2, 0], bounds[2, 1], res)
-    k = int(np.argmin(np.abs(z_grid - z_slice_target)))
-    z_here = z_grid[k]
+        print(f"\n{method_name} hyperparameter fitting complete in {tock - tick:.3f}s")
 
-    print(f"\nPlotting xy slices at z={z_here:.6g}")
+        ell = jnp.asarray(fit["ell"])
+        var = float(fit["var"])
+        noise = float(fit["noise"])
 
-    Xs = P[:, :, k, 0]
-    Ys = P[:, :, k, 1]
+        print(f"\n{method_name} lengthscales")
+        print("-" * (len(method_name) + 13))
+        print(f"Test grid spacing: {dx_test}")
+        print(f"Fitted ell:        {fit['ell']}")
+        print(f"ell / dx_test:     {fit['ell'] / dx_test}")
+        print(f"Sample spacing:    {fit.get('sample_spacing', np.nan)}")
 
-    prior_slice = prior_U[:, :, k, :]
-    post_slice = post_U[:, :, k, :]
-    cfd_slice = cfd_U[:, :, k, :]
+        tick = time.perf_counter()
+        K_matrix = assemble_dat_shi(
+            training_coords,
+            training_coords,
+            ell,
+            var,
+            noise_std=noise,
+            jitter=1e-8,
+        )
+        tock = time.perf_counter()
 
-    prior_mag = velocity_magnitude(prior_slice)
-    post_mag = velocity_magnitude(post_slice)
-    cfd_mag = velocity_magnitude(cfd_slice)
+        print(f"\n{method_name} K_matrix assembled in {tock - tick:.3f}s")
+        print(f"K_matrix shape: {K_matrix.shape}")
 
-    prior_us = prior_slice[:, :, 0]
-    prior_vs = prior_slice[:, :, 1]
+        residuals = jnp.asarray(training_vels - means_training).reshape(-1, 1)
+        c, low = cho_factor(K_matrix)
+        alpha = cho_solve((c, low), residuals)
 
-    post_us = post_slice[:, :, 0]
-    post_vs = post_slice[:, :, 1]
+        tick = time.perf_counter()
+        GPR_posterior = posterior_mean_batched(
+            test_points,
+            training_coords,
+            ell,
+            var,
+            alpha,
+            means_tests_base,
+            batch=posterior_batch,
+        )
+        tock = time.perf_counter()
 
-    cfd_us = cfd_slice[:, :, 0]
-    cfd_vs = cfd_slice[:, :, 1]
+        print(f"\n{method_name} GPR posterior generated in {tock - tick:.3f}s")
+        print(f"GPR_posterior shape: {GPR_posterior.shape}")
 
-    # Mesh vertices near the actual z slice.
-    slice_tol = 0.5 * abs(z_grid[1] - z_grid[0]) if res > 1 else 1e-6
-    near_slice = np.abs(verts[:, 2] - z_here) <= slice_tol
+        GPR_posterior_reshaped = np.array(GPR_posterior).reshape(-1, 3)
+        GPR_posterior_reshaped[inside_test] = 0.0
+        print(
+            f"Zeroed {method_name} posterior velocity inside mesh: "
+            f"{inside_test.sum()} / {len(inside_test)} test points"
+        )
 
-    print(f"Mesh vertices near slice: {near_slice.sum()} / {len(verts)}")
+        print(f"\n{method_name} training reconstruction check")
+        print("-" * (len(method_name) + 30))
 
-    # -------------------------------------------------------------------------
-    # CFD vs prior vs posterior
-    # -------------------------------------------------------------------------
-    prior_err = prior_mag - cfd_mag
-    post_err = post_mag - cfd_mag
+        K_train_signal = assemble_dat_shi(
+            training_coords,
+            training_coords,
+            ell,
+            var,
+            noise_std=0.0,
+            jitter=0.0,
+        )
+        train_posterior = jnp.asarray(means_training) + K_train_signal @ alpha
+        posterior_train_rmse = rmse(np.array(train_posterior), training_vels)
 
-    fig_cfd, axs = plt.subplots(2, 3, figsize=(18, 10), constrained_layout=True)
+        print(f"Prior train RMSE:     {prior_train_rmse:.6g}")
+        print(f"Posterior train RMSE: {posterior_train_rmse:.6g}")
+        print(f"Fitted ell:           {fit['ell']}")
+        print(f"Fitted var:           {fit['var']:.6g}")
+        print(f"Fitted noise:         {fit['noise']:.6g}")
 
-    mag_vmin = np.nanmin([cfd_mag, prior_mag, post_mag])
-    mag_vmax = np.nanmax([cfd_mag, prior_mag, post_mag])
+        prior_test = means_tests_base[valid_cfd]
+        post_test = GPR_posterior_reshaped[valid_cfd]
 
-    err_lim = np.nanmax(np.abs([prior_err, post_err]))
+        prior_test_rmse = rmse(prior_test, truth_test)
+        post_test_rmse = rmse(post_test, truth_test)
 
-    plot_items = [
-        (axs[0, 0], cfd_mag, "CFD truth |u|", "viridis", mag_vmin, mag_vmax),
-        (axs[0, 1], prior_mag, "Prior |u|", "viridis", mag_vmin, mag_vmax),
-        (axs[0, 2], post_mag, "Posterior |u|", "viridis", mag_vmin, mag_vmax),
-        (axs[1, 0], post_mag - prior_mag, "Posterior - Prior |u|", "coolwarm", None, None),
-        (axs[1, 1], prior_err, "Prior - CFD |u|", "coolwarm", -err_lim, err_lim),
-        (axs[1, 2], post_err, "Posterior - CFD |u|", "coolwarm", -err_lim, err_lim),
-    ]
+        print(f"\n{method_name} test-grid CFD comparison")
+        print("-" * (len(method_name) + 25))
+        print(f"Valid CFD test points:        {valid_cfd.sum()} / {len(valid_cfd)}")
+        print(f"Prior test RMSE:              {prior_test_rmse:.6g}")
+        print(f"Posterior test RMSE:          {post_test_rmse:.6g}")
+        print(f"Truth test RMS:               {truth_test_rms:.6g}")
+        print(
+            f"Relative prior test RMSE:     "
+            f"{prior_test_rmse / max(truth_test_rms, 1e-12):.6g}"
+        )
+        print(
+            f"Relative posterior test RMSE: "
+            f"{post_test_rmse / max(truth_test_rms, 1e-12):.6g}"
+        )
 
-    pp_lim = np.nanmax(np.abs(post_mag - prior_mag))
+        GPR_vel_mags = np.sqrt(np.sum(GPR_posterior_reshaped ** 2, axis=1))
+        print_vector_stats(
+            f"{method_name} GPR_posterior_reshaped",
+            GPR_posterior_reshaped,
+        )
+        print_vector_stats(f"{method_name} GPR_vel_mags", GPR_vel_mags)
 
-    for ax, field, title, cmap, lo, hi in plot_items:
-        if title.startswith("Posterior - Prior"):
-            lo = -pp_lim
-            hi = pp_lim
+        plot_flow_reconstruction_slice(
+            method_name,
+            stl_mesh,
+            bounds,
+            res,
+            test_points,
+            means_tests_base,
+            GPR_posterior_reshaped,
+            cfd_test_vels,
+            training_coords,
+            z_slice_target,
+            savepath=f"flow_reconstruction_{method_name}.png",
+        )
 
-        pc = ax.contourf(Xs, Ys, field, levels=30, cmap=cmap, vmin=lo, vmax=hi)
-        fig_cfd.colorbar(pc, ax=ax)
+        reconstruction_summaries.append(
+            {
+                "method": method_name,
+                "posterior_train_rmse": posterior_train_rmse,
+                "posterior_test_rmse": post_test_rmse,
+                "relative_posterior_test_rmse": (
+                    post_test_rmse / max(truth_test_rms, 1e-12)
+                ),
+            }
+        )
 
-        if near_slice.any():
-            ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
-
-        ax.set_aspect("equal")
-        ax.set_title(f"{title}, z={z_here:.4g}")
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
+    print("\nReconstruction summary")
+    print("----------------------")
+    for item in reconstruction_summaries:
+        print(
+            f"{item['method']}: "
+            f"train RMSE {item['posterior_train_rmse']:.6g}, "
+            f"test RMSE {item['posterior_test_rmse']:.6g}, "
+            f"relative test RMSE {item['relative_posterior_test_rmse']:.6g}"
+        )
     plt.show()
 
 if __name__ == "__main__":
