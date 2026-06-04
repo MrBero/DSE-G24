@@ -16,7 +16,7 @@ def reconstruct_surface(points: np.ndarray, center: np.ndarray) -> tuple[pv.Poly
     cloud = pv.PolyData(spherical)
     cloud.point_data["orig_idx"] = np.arange(len(points))
 
-    mesh     = cloud.delaunay_3d().extract_surface()
+    mesh     = cloud.delaunay_3d().extract_surface(algorithm='dataset_surface')
     idx      = mesh.point_data["orig_idx"]
     mesh.points = points[idx]
 
