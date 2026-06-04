@@ -242,8 +242,7 @@ def run_gpr(
     cfd_filepath="inputs/FLTG.csv",
     stl_scale=1.0 / 1000.0,
     stl_rotate = None,
-    training_point_n_requested=160,
-    method='cylinder',
+    bounds_input = None,
     res=150,
     posterior_batch=4000,
     v_inf=(12.0, 0.0, 0.0),
@@ -251,11 +250,10 @@ def run_gpr(
     fit_pressure=True,
     sample_method="cylinder",
     sample_config=None,
-    verbose=True,
-):
+    num_samples=150):
+
     v_inf = np.asarray(v_inf, dtype=float)
 
-    
     n_test_est = res ** 3
     print(f"\nrun_gpr: res={res} -> {n_test_est:,} test points, "
             f"batch={posterior_batch}, n_restarts={n_restarts}, "
@@ -275,16 +273,16 @@ def run_gpr(
         # --- Panel solver (prior) ---
         solver = FLOWPanelSolver(stl_mesh, v_inf, julia_script="FP.jl",
                                 julia_bin="julia", verbose=False)
-
-        def prior_fn(pts):
-            return solver.velocity(np.asarray(pts), blank_interior=False).reshape(-1, 3)
         bar()
 
         bar.text('Sampling...')
         # --- Sample training data ---
         ground_truth, bounds, sample_dat_shi = sample(
-        cfd_filepath, stl_mesh, method=method,
+        cfd_filepath, stl_mesh, sample_method=sample_method, num_samples=num_samples, sample_config=sample_config,
         epsilon=0.02, use_signed_distance=True,)
+
+        if bounds_input is not None:
+            bounds = bounds_input
 
         bar.text('Training points...')
         training_coords = ground_truth[["x-target", "y-target", "z-target"]].to_numpy()
@@ -328,6 +326,7 @@ def run_gpr(
         bar.text('Fit hyperparameters')
         # --- Fit GP to residuals ---
         residuals = training_vels - means_training
+        # print(training_vels)
 
         if np.isnan(residuals).any():
             raise RuntimeError("NaNs in residuals_for_fit.")
@@ -352,7 +351,7 @@ def run_gpr(
         bar.text(f"Velocity posterior over grid ({n_chunks} chunks)...")
         GPR_posterior = posterior_mean_batched(
             test_points, training_coords, ell, var, alpha, means_tests,
-            batch=posterior_batch, progress_every=50)
+            batch=posterior_batch, progress_every=posterior_batch*10)
         GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
         bar.text(f"Variance posterior over grid ({n_chunks} chunks)...")
@@ -360,7 +359,7 @@ def run_gpr(
         # full-grid K_test or beta is ever formed (that was the OOM).
         GPR_variances = posterior_vars_batched(
             test_points, training_coords, ell, var, c, low,
-            batch=posterior_batch, progress_every=50)
+            batch=posterior_batch, progress_every=posterior_batch*10)
         GPR_variances = np.array(GPR_variances).reshape(-1, 3)
 
         # Training reconstruction check
@@ -435,6 +434,7 @@ def run_gpr(
         "mesh_vertices": np.asarray(solver.mesh.vertices),
         "fit": fit,
         "metrics": metrics,
+        'V_inf': v_inf
     }
 
 

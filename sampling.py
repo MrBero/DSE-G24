@@ -262,14 +262,16 @@ def sample(
     field_path,
     stl_mesh,
     samples=None,
-    method="CSV",
+    sample_method="CSV",
+    sample_config=None,
     epsilon=0.02,
     num_samples=150,
     use_signed_distance=True,
     oversample_factor=4,
     max_random_iters=100,
-    config=None,
 ):
+    method = sample_method
+    config = sample_config
     print('Reading csv...')
     cfd = pd.read_pickle(field_path)
     cfd.columns = cfd.columns.str.strip()
@@ -291,9 +293,7 @@ def sample(
         [source_coords[:, 2].min(), source_coords[:, 2].max()],
     ])
     print("Building interpolator...")
-    # values = sp.interpolate.griddata(
-    #     source_coords, source_values, points, method="linear", fill_value=np.nan,
-    # )
+    
     sample_dat_shi = build_cfd_sampler(cfd, n_points=8, sharpness=2)
     del cfd
 

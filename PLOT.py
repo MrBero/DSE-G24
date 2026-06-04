@@ -49,6 +49,8 @@ def plot_posterior_3d(result, max_field_points=6000, field_alpha=0.06):
     test_points = np.asarray(result["test_points"])
     GPR_posterior = np.asarray(result["GPR_posterior"])
     training_coords = np.asarray(result["training_coords"])
+    mesh_vertices = np.asarray(result['mesh_vertices'])
+    v_inf = result['V_inf']
 
     vel_mags = _velocity_magnitude(GPR_posterior)
 
@@ -66,19 +68,14 @@ def plot_posterior_3d(result, max_field_points=6000, field_alpha=0.06):
     ax = fig.add_subplot(projection="3d")
 
     # faint translucent field so reds pop through
-    sc = ax.scatter3D(
-        tp[:, 0], tp[:, 1], tp[:, 2],
-        c=vm, cmap="viridis", alpha=field_alpha, s=3,
-        edgecolors="none", rasterized=True,
-    )
+    sc = ax.scatter3D(tp[:, 0], tp[:, 1], tp[:, 2], c=vm, cmap="viridis", alpha=field_alpha, s=3, edgecolors="none", rasterized=True)
     fig.colorbar(sc, ax=ax, label="|velocity|")
 
+    ax.scatter3D(mesh_vertices[:,0], mesh_vertices[:,1], mesh_vertices[:,2], c='black')
+    ax.quiver(*(v_inf*3), *v_inf, length=3)
+
     # training samples drawn last, opaque, large, no depth fading
-    ax.scatter3D(
-        training_coords[:, 0], training_coords[:, 1], training_coords[:, 2],
-        c="red", s=60, depthshade=False, edgecolors="white", linewidths=0.6,
-        label="training samples", zorder=10,
-    )
+    ax.scatter3D(training_coords[:, 0], training_coords[:, 1], training_coords[:, 2], c="red", s=60, depthshade=False, edgecolors="white", linewidths=0.6, label="training samples", zorder=10)
     ax.legend(loc="upper right")
 
     ax.set_title("GPR posterior velocity magnitude")
