@@ -42,6 +42,15 @@ def reconstruct_surface_bpa(
 
     radii = o3d.utility.DoubleVector([L * f for f in radii_factors])
     mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(pcd, radii)
+
+
+    if len(mesh.triangles) == 0:
+        raise ValueError(
+            f"BPA produced no triangles. "
+            f"Point spacing vs radii mismatch likely. "
+            f"L={L}, radii_factors={radii_factors}, n_points={len(points)}"
+        )
+
     mesh.compute_vertex_normals()
     return mesh, pcd
 
