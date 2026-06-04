@@ -90,7 +90,7 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
     return result_matrix
 
 # Hyperparam fitting, the fun stuff
-def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, seed=0):
+def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-4, seed=0):
     
     X = jnp.asarray(train_coords)
     y = jnp.asarray(train_residuals).reshape(-1, 1)
@@ -239,6 +239,21 @@ def ts():
     return time.perf_counter()
 
 # =============================================================================
+# Sampling defaults per method
+# =============================================================================
+
+# Each sampling method takes its own config keys. When main() doesn't pass a
+# sample_config, fall back to the method-appropriate default below.
+SAMPLE_DEFAULTS = {
+    "cylinder": {"r_factor": 1.5, "h_factor": 2.0, "tilt_deg": 30,
+                 "n_rings": 20, "n_per_ring": 24},
+    "drone_array": {"tilt_deg": 30, "n_rows": 10, "n_cols": 10},
+    "random": {},
+    "CSV": {},
+    "array": {},
+}
+
+# =============================================================================
 # Callable pipeline
 # =============================================================================
 
@@ -252,16 +267,10 @@ def run_gpr(
     v_inf=(12.0, 0.0, 0.0),
     n_restarts=6,
     fit_pressure=True,
+    sample_method="cylinder",
+    sample_config=None,
     verbose=True,
 ):
-    """
-    Run the full velocity (and optional pressure) GPR pipeline.
-
-    Returns a dict holding everything the plotting code needs:
-        test_points, bounds, res, means_tests, GPR_posterior (Nx3),
-        cfd_test_vels, pressure_posterior, training_coords, mesh_vertices,
-        fit, metrics.
-    """
     v_inf = np.asarray(v_inf, dtype=float)
 
     
@@ -287,10 +296,11 @@ def run_gpr(
 
         bar.text('Sampling...')
         # --- Sample training data ---
+        cfg = sample_config if sample_config is not None else SAMPLE_DEFAULTS.get(sample_method, {})
         ground_truth, bounds = sample(
-        cfd_filepath, stl_mesh, method="drone_array",
-        epsilon=0.02, use_signed_distance=True,
-        config={"tilt_deg": 30, "n_rows": 10, "n_cols": 10},
+            cfd_filepath, stl_mesh, method=sample_method,
+            epsilon=0.02, use_signed_distance=True,
+            config=cfg,
         )
 
         bar.text('Training points...')

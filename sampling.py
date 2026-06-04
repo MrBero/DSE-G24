@@ -3,6 +3,7 @@ import numpy.random as rnd
 import scipy as sp
 import pandas as pd
 import trimesh
+from scipy.stats import qmc
 
 
 seed = 7
@@ -45,52 +46,56 @@ def _mesh_reject_mask(points, stl_mesh, epsilon=0.02, use_signed_distance=True):
 
 
 # =============================================================================
-# Drone-array sampling  
+# Cylinder sampling
 # =============================================================================
 def _oblique_cylinder_points(stl_mesh,
                              r_factor,
                              h_factor,
                              tilt_deg=23.0,
                              clearance=0.1,
-                             n_rings=7,
-                             n_per_ring=16):
-    V = np.asarray(stl_mesh.vertices)               #get corners of building
-    width_body  = V[:, 1].max() - V[:, 1].min()     #ymax-ymin
-    height_body = V[:, 2].max() - V[:, 2].min()     #zmax-zmin
-    char_size   = max(width_body, height_body)      #get largest
+                             n_points=300,
+                             front_frac=0.5,
+                             front_half_angle_deg=45.0,
+                             seed=7):
 
-    R = r_factor * char_size                        #get radius
-    H = h_factor * char_size                        #get height
+    V = np.asarray(stl_mesh.vertices)
+    width_body = V[:, 1].max() - V[:, 1].min()
+    height_body = V[:, 2].max() - V[:, 2].min()
+    char_size = max(width_body, height_body)
 
-    z_lo, z_hi = V[:, 2].min(), V[:, 2].max()       #lowest point, highest point
-    z_mid = 0.5 * (z_lo + z_hi)                     #mid height of building
-    cx = 0.5 * (V[:, 0].min() + V[:, 0].max())      #x location of centroid
-    cy = 0.5 * (V[:, 1].min() + V[:, 1].max())      #y location of centroid
+    R = r_factor * char_size
+    H = h_factor * char_size
 
-    shift_per_height = np.tan(np.radians(tilt_deg)) #slope of oblique cylinder
+    z_lo = V[:, 2].min()
+    z_hi = V[:, 2].max()
+    z_mid = 0.5 * (z_lo + z_hi)
+    cx = 0.5 * (V[:, 0].min() + V[:, 0].max())
+    cy = 0.5 * (V[:, 1].min() + V[:, 1].max())
 
-    z_bottom = z_lo + clearance                     #bottom z-coordinate of cricle
-    dz_bottom = z_bottom - z_mid                    #change between bottom and mid
-    bottom_cx = cx + shift_per_height * dz_bottom   #change in x between bottom and mid bcs of tilt
-    bottom_cy = cy                                  #y doesnt change
+    shift_per_height = np.tan(np.radians(tilt_deg))
+    z_bottom = z_lo + clearance
+    bottom_cx = cx + shift_per_height * (z_bottom - z_mid)
 
-    z_rings = np.linspace(z_bottom, z_bottom + H, n_rings)          #get a spacing of rings
-    phi = np.concatenate([
-    np.linspace(-np.pi/4, np.pi/4, n_per_ring // 2, endpoint=False),     
-    np.linspace(np.pi/4, 7*np.pi/4, n_per_ring - n_per_ring // 2, endpoint=False),
-    ])
+    half = np.radians(front_half_angle_deg)
+    n_front = int(round(front_frac * n_points))
+    n_back = n_points - n_front
 
-    pts = []
-    for z in z_rings:
-        dz = z - z_bottom                                           #for every vertical height, calculate difference with bottom
-        ring_cx = bottom_cx + shift_per_height * dz                 #calculate shift in x xcoordinate of centroid bcs of tilt
-        ring_cy = bottom_cy                                         #calculate ycoordinate of centroid
-        x = ring_cx + R * np.cos(phi)                               #make circle
-        y = ring_cy + R * np.sin(phi)                               #make circle
-        zc = np.full(n_per_ring, z)                                 #make array of n_per_ring times the z coordinate
-        pts.append(np.column_stack([x, y, zc]))                     #add the points to the list
+    def shell_lhs(n, phi_min, phi_max, sd):
+        if n <= 0:
+            return np.empty((0, 3))
+        u = qmc.LatinHypercube(d=2, seed=sd).random(n)
+        phi = phi_min + u[:, 0] * (phi_max - phi_min)
+        z = z_bottom + u[:, 1] * H
+        ring_cx = bottom_cx + shift_per_height * (z - z_bottom)
+        x = ring_cx + R * np.cos(phi)
+        y = cy + R * np.sin(phi)
+        return np.column_stack([x, y, z])
 
-    return np.vstack(pts)
+    # phi ~ 0 is the wake (+x) side; front band is the wake wedge.
+    front = shell_lhs(n_front, -half, half, seed)
+    back = shell_lhs(n_back, half, 2.0 * np.pi - half, seed + 1)
+    return np.vstack([front, back])
+
 
 def _drone_array_points(stl_mesh,
                         bounds,
