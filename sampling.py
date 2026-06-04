@@ -5,6 +5,8 @@ import pandas as pd
 import trimesh
 from scipy.stats import qmc
 
+from INTERP.interpolation import build_cfd_sampler
+
 
 seed = 7
 rnd.seed(seed)
@@ -45,9 +47,6 @@ def _mesh_reject_mask(points, stl_mesh, epsilon=0.02, use_signed_distance=True):
     return valid
 
 
-# =============================================================================
-# Cylinder sampling
-# =============================================================================
 def _oblique_cylinder_points(stl_mesh,
                              r_factor,
                              h_factor,
@@ -259,10 +258,6 @@ def _freestream_mask(points, prior_fn, v_inf, tol):
     # True = disturbed, False = essentially freestream (drop).
     return deviation > tol
 
-# =============================================================================
-# Main sample()
-# =============================================================================
-
 def sample(
     field_path,
     stl_mesh,
@@ -275,18 +270,8 @@ def sample(
     max_random_iters=100,
     config=None,
 ):
-    """Sample CFD velocity and pressure at target points, returning (df, bounds).
-
-    method:
-        "CSV"          samples is a path to a CSV with x/y/z-coordinate columns.
-        "array"        samples is an (N, 3) array of coordinates.
-        "random"       scatter num_samples points, rejecting any inside/near the mesh.
-        "drone_array"  tilted drone grid from _drone_array_points.
-        "cylinder"     oblique cylindrical shell from _oblique_cylinder_points.
-
-    Generator kwargs for "drone_array"/"cylinder" go through `config`.
-    """
-    cfd = pd.read_csv(field_path)
+    print('Reading csv...')
+    cfd = pd.read_pickle(field_path)
     cfd.columns = cfd.columns.str.strip()
 
     required = [
@@ -297,20 +282,27 @@ def sample(
     if missing:
         raise ValueError(f"Missing required columns in CFD CSV: {missing}")
 
+    print('Extracting coords & vals...')
     source_coords = cfd[["x-coordinate", "y-coordinate", "z-coordinate"]].to_numpy(float)
-    source_values = cfd[["x-velocity", "y-velocity", "z-velocity", "pressure"]].to_numpy(float)
 
     bounds = np.array([
         [source_coords[:, 0].min(), source_coords[:, 0].max()],
         [source_coords[:, 1].min(), source_coords[:, 1].max()],
         [source_coords[:, 2].min(), source_coords[:, 2].max()],
     ])
+    print("Building interpolator...")
+    # values = sp.interpolate.griddata(
+    #     source_coords, source_values, points, method="linear", fill_value=np.nan,
+    # )
+    sample_dat_shi = build_cfd_sampler(cfd, n_points=8, sharpness=2)
+    del cfd
 
     def reject(points):
         return points[_mesh_reject_mask(
             points, stl_mesh, epsilon=epsilon, use_signed_distance=use_signed_distance,
         )]
 
+    print('Collecting points of interest...')
     if method == "drone_array":
         points = reject(_drone_array_points(stl_mesh, bounds, **(config or {})))
         if len(points) == 0:
@@ -363,9 +355,7 @@ def sample(
     else:
         raise ValueError(f"unknown method {method!r}")
 
-    values = sp.interpolate.griddata(
-        source_coords, source_values, points, method="linear", fill_value=np.nan,
-    )
+    values = sample_dat_shi(points)
 
     columns = [
         "x-target", "y-target", "z-target",
@@ -384,4 +374,4 @@ def sample(
     if len(df) == 0:
         raise RuntimeError("All sampled points became NaN after interpolation.")
 
-    return df, bounds
+    return df, bounds, sample_dat_shi
