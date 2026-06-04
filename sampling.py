@@ -55,11 +55,19 @@ def _drone_array_points(stl_mesh,
                         standoff_factor=1.0,  #if we want to use a factor*length of building for flow distance building <-> array
                         z_floor = None,          #bottom-row altitude, if none the first row will have a height of domain floor + clearance
                         z_clearance=0.0,
-                        n_rows = 10,
-                        n_cols = 10,
+                        n_rows = 9,
+                        n_cols = 9,
                         width_factor = 2.5, #target width of array = width_factor * building width 
                         height_factor = 2.0, #vertical coverage target = height_factor * building height
                         domain_margin_frac=0.02, #fractional margin to stay within CFD domain
+
+                        return_pool = False,
+                        prior_fn = None,
+                        v_inf = None,
+                        freestream_frac = 0.05,
+                        pool_pad_factor = 1.5,
+                        pool_n_per_axis=10,
+                        keepout = 5,
                         ):
     #calculate the target of sampling points for a check at the end and check that we at least have one row and column
     if n_rows < 1 or n_cols < 1:
@@ -89,7 +97,7 @@ def _drone_array_points(stl_mesh,
     my = domain_margin_frac * (y1 - y0)
     mz = domain_margin_frac * (z1 - z0)
 
-    x_legal_max    = x1 - mx
+    x_legal_max         = x1 - mx
     z_legal_max         = z1 - mz
     y_legal_min         = y0 + my
     y_legal_max         = y1 - my
@@ -141,16 +149,66 @@ def _drone_array_points(stl_mesh,
     width_clamped = W < W_target - 1e-9
     slant_clamped = L < L_target - 1e-9
 
-    #diagnostics
-    print("\nTilted drone-array sampling (drone_array method)")
-    print(f"tilt:            {tilt_deg:.4g} deg")
-    print(f"standoff d0:     {d0:.4g}  (char body size {char_size:.4g})")
-    print(f"anchor (x,y,z):  ({x_anchor:.4g}, {y_anchor:.4g}, {z_anchor:.4g})")
-    print(f"width W:         {W:.4g}  (target {W_target:.4g}{'  <-- CLAMPED by domain' if width_clamped else ''})")
-    print(f"slant L:         {L:.4g}  (target {L_target:.4g}{'  <-- CLAMPED by domain/ceiling' if slant_clamped else ''})")
 
-    return pts
 
+    if not return_pool:
+        return pts
+    if prior_fn is None or v_inf is None:
+        raise ValueError("return_pool=True needs prior_fn and v_inf for the freestream mask.")
+    
+    #how far around the building the building reaches
+    pad = pool_pad_factor * char_size
+    
+    #outer box, cfd domain minus margin
+    out_y0, out_y1 = y0 + my, y1 - my
+    out_z0, out_z1 = z0 + mz, z1 - mz
+    out_x0, out_x1 = x0 + mx, x1 - mx                   #uncomment if we also want drones in the wake
+    # out_x0, out_x1 = x0 + mx, vertices_x.max()        #uncomment if we dont want drones in the wake
+
+    #inner box, dibt want too close to the building
+    in_x0 = vertices_x.min() - keepout
+    in_x1 = vertices_x.max() + keepout
+    in_y0 = vertices_y.min() - keepout
+    in_y1 = vertices_y.max() + keepout
+    in_z0 = vertices_z.min() - keepout
+    in_z1 = vertices_z.max() + keepout
+        
+    # fill the box with a regular lattice of raw candidates
+    px = np.linspace(out_x0, out_x1, pool_n_per_axis)
+    py = np.linspace(out_y0, out_y1, pool_n_per_axis)
+    pz = np.linspace(out_z0, out_z1, pool_n_per_axis)
+    pxx, pyy, pzz = np.meshgrid(px, py, pz, indexing="ij")
+    pool = np.column_stack([pxx.ravel(), pyy.ravel(), pzz.ravel()])
+
+
+    # exclude the points in inner box
+    inside_building_box = (
+        (pool[:, 0] > in_x0) & (pool[:, 0] < in_x1) &
+        (pool[:, 1] > in_y0) & (pool[:, 1] < in_y1) &
+        (pool[:, 2] > in_z0) & (pool[:, 2] < in_z1)
+    )
+    pool = pool[~inside_building_box]
+
+    #get the points out where potential flow is close to the freestream flow
+    tol = freestream_frac * np.linalg.norm(np.asarray(v_inf))
+    pool = pool[_freestream_mask(pool, prior_fn, v_inf, tol)]
+
+    return pts, pool
+
+def _freestream_mask(points, prior_fn, v_inf, tol):
+    points = np.asarray(points)
+
+    # Potential flow at each candidate point
+    prior = np.asarray(prior_fn(points))
+
+    # Use the freestream as a full vector so any wind direction works.
+    V_inf = np.asarray(v_inf)
+
+    # sqrt((du)^2 + (dv)^2 + (dw)^2) for each row -> deviation from freestream (m/s).
+    deviation = np.linalg.norm(prior - V_inf, axis=1)
+
+    # True = disturbed, False = essentially freestream (drop).
+    return deviation > tol
 
 # =============================================================================
 # Main sample()
