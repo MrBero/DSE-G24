@@ -3,3 +3,4 @@ __pycache__
 input_stls
 inputs
 .venv
+*csv_with_everything*
