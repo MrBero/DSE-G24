@@ -91,10 +91,7 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
 
 # Hyperparam fitting, the fun stuff
 def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, seed=0):
-    """
-    Maximum marginal likelihood fit of GP hyperparameters without physical heuristics.
-    Uses wide, generic log-space bounds [-11.5, 11.5] for all parameters.
-    """
+    
     X = jnp.asarray(train_coords)
     y = jnp.asarray(train_residuals).reshape(-1, 1)
     n = X.shape[0]
@@ -293,7 +290,8 @@ def run_gpr(
         ground_truth, bounds = sample(
         cfd_filepath, stl_mesh, method="drone_array",
         epsilon=0.02, use_signed_distance=True,
-        drone_array_config={"tilt_deg": 30, "n_rows": 10, "n_cols": 10})
+        config={"tilt_deg": 30, "n_rows": 10, "n_cols": 10},
+        )
 
         bar.text('Training points...')
         training_coords = ground_truth[["x-target", "y-target", "z-target"]].to_numpy()
