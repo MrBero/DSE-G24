@@ -47,6 +47,47 @@ def _mesh_reject_mask(points, stl_mesh, epsilon=0.02, use_signed_distance=True):
 # =============================================================================
 # Drone-array sampling  
 # =============================================================================
+def _oblique_cylinder_points(stl_mesh,
+                             r_factor,
+                             h_factor,
+                             tilt_deg=23.0,
+                             clearance=5.0,
+                             n_rings=10,
+                             n_per_ring=72):
+    V = np.asarray(stl_mesh.vertices)               #get corners of building
+    width_body  = V[:, 1].max() - V[:, 1].min()     #ymax-ymin
+    height_body = V[:, 2].max() - V[:, 2].min()     #zmax-zmin
+    char_size   = max(width_body, height_body)      #get largest
+
+    R = r_factor * char_size                        #get radius
+    H = h_factor * char_size                        #get height
+
+    z_lo, z_hi = V[:, 2].min(), V[:, 2].max()       #lowest point, highest point
+    z_mid = 0.5 * (z_lo + z_hi)                     #mid height of building
+    cx = 0.5 * (V[:, 0].min() + V[:, 0].max())      #x location of centroid
+    cy = 0.5 * (V[:, 1].min() + V[:, 1].max())      #y location of centroid
+
+    shift_per_height = np.tan(np.radians(tilt_deg)) #slope of oblique cylinder
+
+    z_bottom = z_lo + clearance                     #bottom z-coordinate of cricle
+    dz_bottom = z_bottom - z_mid                    #change between bottom and mid
+    bottom_cx = cx + shift_per_height * dz_bottom   #change in x between bottom and mid bcs of tilt
+    bottom_cy = cy                                  #y doesnt change
+
+    z_rings = np.linspace(z_bottom, z_bottom + H, n_rings)          #get a spacing of rings
+    phi = np.linspace(0.0, 2.0 * np.pi, n_per_ring, endpoint=False) #get a lot of different angles for the circle
+
+    pts = []
+    for z in z_rings:
+        dz = z - z_bottom                                           #for every vertical height, calculate difference with bottom
+        ring_cx = bottom_cx + shift_per_height * dz                 #calculate shift in x xcoordinate of centroid bcs of tilt
+        ring_cy = bottom_cy                                         #calculate ycoordinate of centroid
+        x = ring_cx + R * np.cos(phi)                               #make circle
+        y = ring_cy + R * np.sin(phi)                               #make circle
+        zc = np.full(n_per_ring, z)                                 #make array of n_per_ring times the z coordinate
+        pts.append(np.column_stack([x, y, zc]))                     #add the points to the list
+
+    return np.vstack(pts)
 
 def _drone_array_points(stl_mesh,
                         bounds,
