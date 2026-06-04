@@ -70,8 +70,8 @@ def build_cfd_sampler(df, n_points: int = 8, sharpness: float = 2.0):
 # Example
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
-    sample = build_cfd_sampler(PKL_PATH, n_points=N_POINTS, sharpness=SHARPNESS)
+    df = pd.read_pickle(PKL_PATH)
+    sample = build_cfd_sampler(df, n_points=N_POINTS, sharpness=SHARPNESS)
 
-    out = sample([[1, 2, 1], [5, 2, 1], [-50, 2, 1],[-50, 2, 1],[-50, 2, 1]])
-    print("velocity :\n", out['velocity'])
-    print("pressure :\n", out['pressure'])
+    out = sample([[1, 2, 1], [5, 2, 1], [-50, 2, 1], [-50, 2, 1], [-50, 2, 1]])
+    print("result:\n", out)

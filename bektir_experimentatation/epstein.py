@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pyvista
 from INTERP import interpolation
 from momentum import momentum_closed, momentum_open
@@ -6,9 +7,9 @@ from momentum import momentum_closed, momentum_open
 
 PKL_PATH = r"INTERP\csv_with_everything.pkl"
 MIDPOINT = np.array([
-    -6524.591 / 1000,
-    1.213 * 10**5 / 10**3,
-    52.6 / 2
+	-6524.591 / 1000,
+	1.213 * 10**5 / 10**3,
+	52.6 / 2
 ])
 N_POINTS = 4
 SHARPNESS = 2
@@ -54,7 +55,7 @@ def sample_cylinder_uniform(
 	return np.vstack(points)
 
 
-region_points = np.array([MIDPOINT[0],MIDPOINT[1],10]) + sample_cylinder_uniform(20,70, n = 80, top=True, bottom=True)
+region_points = np.array([MIDPOINT[0],MIDPOINT[1],10]) + sample_cylinder_uniform(20, 70, n=80, top=True, bottom=True)
 print('x_min, ', np.min(region_points[:,0]))
 print('y_min ', np.min(region_points[:,1]))
 print('z_min ', np.min(region_points[:,2]))
@@ -63,15 +64,16 @@ print('z_min ', np.min(region_points[:,2]))
 cloud = pyvista.PolyData(region_points)
 
 print('build interp')
-sample = interpolation.build_cfd_sampler(PKL_PATH, n_points=N_POINTS, sharpness=SHARPNESS)
+df = pd.read_pickle(PKL_PATH)
+sample = interpolation.build_cfd_sampler(df, n_points=N_POINTS, sharpness=SHARPNESS)
 
-print(sample([[-6524.591 / 1000,1.213 * 10**5 / 10**3,0]]))
+print(sample([[-6524.591 / 1000, 1.213 * 10**5 / 10**3, 0]]))
 
 print('interp points')
-v,p = sample(region_points)
+out = sample(region_points)
+v = out[:, :3]
+p = out[:, 3]
 
-# has_bad = not np.isfinite(v[v != None]).all()
-# has_bad2 = not np.isfinite(p[p != None]).all()
 print(np.isnan(v).any())
 print(np.isnan(p).any())
 
@@ -86,12 +88,7 @@ F, mesh = momentum_closed.surface_force(
 	rho=1.225,
 )
 
-
-
 print(F)
-
-
-
 
 arrows = mesh.glyph(orient="Normals", scale=False, factor=5)
 
