@@ -95,8 +95,8 @@ def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, se
     y = jnp.asarray(train_residuals).reshape(-1, 1) #load y 
     n = X.shape[0] # number of points
     #lower and upper bound in log space 
-    lo = np.full(5, np.log(1e-5))
-    hi = np.full(5, np.log(1e5))
+    lo = np.log([5.0,  5.0,  5.0,  1e-1, 1e-2])
+    hi = np.log([150.0, 150.0, 150.0, 1e3,  2e0])
 
     @jax.jit
     #find negative log likelihood
@@ -280,7 +280,7 @@ def run_gpr(
         ground_truth, bounds, sample_dat_shi = sample(
         cfd_filepath, stl_mesh, sample_method=sample_method, num_samples=num_samples, sample_config=sample_config,
         epsilon=0.02, use_signed_distance=True,)
-
+    
         if bounds_input is not None:
             bounds = bounds_input
 
@@ -331,7 +331,7 @@ def run_gpr(
         if np.isnan(residuals).any():
             raise RuntimeError("NaNs in residuals_for_fit.")
 
-        fit = fit_hyperparams(training_coords, residuals, n_restarts=n_restarts, jitter=1e-6, seed=0)
+        fit = fit_hyperparams(training_coords, residuals, n_restarts=n_restarts, jitter=1e-4, seed=0)
         
         print(f"    nll={fit['nll']:.6g}  ell={fit['ell']}  "
             f"var={fit['var']:.4g}  noise={fit['noise']:.4g}", flush=True)
@@ -391,7 +391,7 @@ def run_gpr(
             train_p = ground_truth["pressure"].to_numpy()
             p_kernel = Matern(
                 length_scale=[1.0, 1.0, 1.0], 
-                length_scale_bounds=(1e-2, 1e2), 
+                length_scale_bounds=(1e-2, 1e3), 
                 nu=2.5)
                 
             p_gpr = GaussianProcessRegressor(
