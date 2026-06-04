@@ -88,7 +88,7 @@ def assemble_dat_shi(points_1, points_2, ell, var, noise_std=0.0, jitter=0.0):
     return result_matrix
 
 # Hyperparam fitting, the fun stuff
-def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-4, seed=0):
+def fit_hyperparams(train_coords, train_residuals, n_restarts=8, jitter=1e-6, seed=0):
     
     X = jnp.asarray(train_coords)
     y = jnp.asarray(train_residuals).reshape(-1, 1)
@@ -163,24 +163,30 @@ def posterior_mean_batched(test_points, training_coords, ell, var, alpha, means_
 
     return out.reshape(-1, 1)
 
-def posterior_vars_batched(test_points, training_coords, ell, var, beta,
-                           batch=300, progress_every=0):
+def posterior_vars_batched(test_points, training_coords, ell, var, c, low,
+                           batch=2000, progress_every=0):
+    """
+    Stream the GP posterior variance diagonal over chunks of test points.
+
+    Solves each chunk's cross-covariance against the Cholesky factors (c, low)
+    locally, so no full-grid K_test or beta is ever allocated. Peak memory
+    scales with `batch`, not with the number of test points. Returns (3*n_test,).
+    """
     test_points = np.asarray(test_points)
     n_test = test_points.shape[0]
-    out = np.empty((n_test*3), dtype=float)
-    beta_local = jnp.asarray(beta)
+    out = np.empty((n_test * 3,), dtype=float)
     n_chunks = (n_test + batch - 1) // batch
 
     for ci, i in enumerate(range(0, n_test, batch)):
-        chunk = test_points[i:i+batch]
-        n_chunk = chunk.shape[0]
+        chunk = test_points[i:i + batch]
+        m = chunk.shape[0]
 
-        K_tests_slice = jnp.array(assemble_dat_shi(chunk, chunk, ell, var))
-        k_slice = jnp.array(assemble_dat_shi(chunk, training_coords, ell, var))
-        
-        beta_slice = np.array(beta[:, i*3:(i+batch)*3])
-        contrib = k_slice @ beta_slice
-        out[i*3:(i + batch)*3] = jnp.diag(K_tests_slice - contrib)
+        K_tt = assemble_dat_shi(chunk, chunk, ell, var)              # (3m, 3m)
+        k_tc = assemble_dat_shi(chunk, training_coords, ell, var)    # (3m, 3n)
+        beta_chunk = cho_solve((c, low), jnp.asarray(k_tc.T))        # (3n, 3m)
+        diag = jnp.diag(K_tt - k_tc @ beta_chunk)                    # (3m,)
+
+        out[i * 3:(i + m) * 3] = np.asarray(diag)
         if progress_every and (ci % progress_every == 0 or ci == n_chunks - 1):
             print(f"    posterior vars chunk {ci + 1}/{n_chunks}", flush=True)
     return out
@@ -218,8 +224,7 @@ def ts():
 # Each sampling method takes its own config keys. When main() doesn't pass a
 # sample_config, fall back to the method-appropriate default below.
 SAMPLE_DEFAULTS = {
-    "cylinder": {"r_factor": 1.5, "h_factor": 2.0, "tilt_deg": 30,
-                 "n_rings": 20, "n_per_ring": 24},
+    "cylinder": {"r_factor": 1.5, "h_factor": 2.0, "tilt_deg": 30, "n_points": 300},
     "drone_array": {"tilt_deg": 30, "n_rows": 10, "n_cols": 10},
     "random": {},
     "CSV": {},
@@ -246,6 +251,19 @@ def run_gpr(
     sample_config=None,
     verbose=True,
 ):
+    """
+    Run the full velocity (and optional pressure) GPR pipeline.
+
+    Sampling is selected with sample_method (e.g. "cylinder", "drone_array",
+    "random") and tuned with sample_config. Different methods take different
+    config keys; if sample_config is None, the method's default from
+    SAMPLE_DEFAULTS is used.
+
+    Returns a dict holding everything the plotting code needs:
+        test_points, bounds, res, means_tests, GPR_posterior (Nx3),
+        cfd_test_vels, pressure_posterior, training_coords, mesh_vertices,
+        fit, metrics.
+    """
     v_inf = np.asarray(v_inf, dtype=float)
 
     
@@ -307,7 +325,7 @@ def run_gpr(
             chunk = test_points[i:i + posterior_batch]
             means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
             if (ci % 50 == 0 or ci == n_chunks - 1):
-                print(f"variances chunk {ci + 1}/{n_chunks}", flush=True)
+                print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
 
         
         means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
@@ -335,13 +353,11 @@ def run_gpr(
         noise = float(fit["noise"])
         bar()
 
-        bar.text('Assemble K + cholesky solve (invert K) at residuals and K(X_train, X_test)...')
+        bar.text('Assemble K + cholesky solve (invert K) at residuals...')
         # --- Solve for alpha, build posterior ---
         K = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=noise, jitter=1e-8)
         c, low = cho_factor(K)
         alpha = cho_solve((c, low), jnp.asarray(residuals)) #inverted K matrix times residuals is alpha
-        K_test = assemble_dat_shi(test_points, training_coords, ell, var)
-        beta = cho_solve((c, low), jnp.asarray(K_test.T))
         bar()
 
         bar.text(f"Velocity posterior over grid ({n_chunks} chunks)...")
@@ -351,8 +367,11 @@ def run_gpr(
         GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
         bar.text(f"Variance posterior over grid ({n_chunks} chunks)...")
-        GPR_variances = posterior_vars_batched(test_points, training_coords, ell, var, beta,
-                                               batch=posterior_batch, progress_every=50)
+        # Variance is streamed per chunk straight from the Cholesky factors; no
+        # full-grid K_test or beta is ever formed (that was the OOM).
+        GPR_variances = posterior_vars_batched(
+            test_points, training_coords, ell, var, c, low,
+            batch=posterior_batch, progress_every=50)
         GPR_variances = np.array(GPR_variances).reshape(-1, 3)
 
         # Training reconstruction check
