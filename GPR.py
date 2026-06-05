@@ -1,4 +1,5 @@
 import os
+import pickle
 
 # Force CPU before importing JAX.
 os.environ["JAX_PLATFORMS"] = "cpu"
@@ -307,12 +308,35 @@ def run_gpr(
         # --- Prior mean (panel solver), streamed over the grid ---
         n_test = test_points.shape[0]
         n_chunks = (n_test + posterior_batch - 1) // posterior_batch
-        means_tests = np.empty((n_test, 3), dtype=float)
-        for ci, i in enumerate(range(0, n_test, posterior_batch)):
-            chunk = test_points[i:i + posterior_batch]
-            means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
-            if (ci % 50 == 0 or ci == n_chunks - 1):
-                print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
+
+        # Cache the Julia prior on the grid. Valid as long as geometry + CFD
+        # bounds are unchanged; res and v_inf are encoded in the filename so
+        # changing either picks a different cache automatically.
+        os.makedirs("prior_cache", exist_ok=True)
+        prior_file = os.path.join(
+            "prior_cache",
+            f"grid_prior_res{res}_vinf{v_inf[0]:g}_{v_inf[1]:g}_{v_inf[2]:g}.pkl",
+        )
+
+        if os.path.exists(prior_file):
+            with open(prior_file, "rb") as f:
+                means_tests = pickle.load(f)
+            if means_tests.shape != (n_test, 3):
+                raise RuntimeError(
+                    f"Cached prior {means_tests.shape} != expected {(n_test, 3)}. "
+                    f"Delete {prior_file} and rerun."
+                )
+            print(f"loaded cached grid prior from {prior_file} (skipping Julia)", flush=True)
+        else:
+            means_tests = np.empty((n_test, 3), dtype=float)
+            for ci, i in enumerate(range(0, n_test, posterior_batch)):
+                chunk = test_points[i:i + posterior_batch]
+                means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
+                if (ci % 50 == 0 or ci == n_chunks - 1):
+                    print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
+            with open(prior_file, "wb") as f:
+                pickle.dump(means_tests, f)
+            print(f"saved grid prior to {prior_file}", flush=True)
 
         
         means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
