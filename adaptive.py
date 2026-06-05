@@ -408,3 +408,64 @@ def propose_adaptive_points(result, previous_coords=None, adaptive_config=None,
     if verbose:
         print(f"[adaptive] total new points: {len(new_points)}")
     return new_points
+
+
+def propose_top_cap_points(result, previous_coords=None, n_new=20,
+                           cap_z_offset=0.0, n_rings=3, adaptive_config=None,
+                           verbose=True):
+    """Place a small number of drones on the cylinder TOP CAP.
+
+    Motivated by momentum escaping through the open top of the control volume:
+    these points sit on the horizontal disk at (or just above) z_top, out to
+    radius R, so the GP has data where the top-surface flux is integrated. Points
+    are spread on concentric rings and de-clustered against previous_coords with
+    the same drone-exclusion ellipsoid as the side sampler.
+
+    n_new       : target number of cap drones (keep small).
+    cap_z_offset: place the cap at z_top + this (0 = exactly on the top ring plane).
+    n_rings     : number of concentric rings to distribute points over.
+    """
+    cfg = dict(ADAPTIVE_DEFAULTS)
+    if adaptive_config:
+        cfg.update(adaptive_config)
+
+    if previous_coords is None:
+        previous_coords = np.asarray(result["training_coords"], float)
+    previous_coords = np.asarray(previous_coords, float)
+
+    fr = _cyl_frame(result)
+    R = fr["R"]
+    z_cap = fr["z_top"] + cap_z_offset
+    cap_center_xy = _ring_center_xy(z_cap, fr)[0]   # tilted center at cap height
+
+    rh = cfg["excl_horizontal"]
+    rv = cfg["excl_vertical"]
+    if cfg["spread_radius"] is not None:
+        scale = max(cfg["spread_radius"] / max(rh, 1e-9), 1.0)
+        rh *= scale; rv *= scale
+
+    # candidate cloud: concentric rings on the cap disk (oversampled)
+    cands = []
+    weights = []
+    ring_radii = np.linspace(0.15 * R, R, n_rings)
+    for ri, rad in enumerate(ring_radii):
+        n_on_ring = max(8, int(round(2 * np.pi * rad / max(rh, 1e-6))))
+        phis = np.linspace(0, 2 * np.pi, n_on_ring, endpoint=False)
+        for phi in phis:
+            x = cap_center_xy[0] + rad * np.cos(phi)
+            y = cap_center_xy[1] + rad * np.sin(phi)
+            cands.append([x, y, z_cap])
+            weights.append(1.0 + ri)     # mild bias to outer rings (where flux is)
+    cands = np.asarray(cands, float)
+    weights = np.asarray(weights, float)
+
+    # mesh-reject then de-cluster with greedy farthest-point selection
+    keep = _mesh_reject_mask(cands, result["stl_mesh"], epsilon=cfg["epsilon"],
+                             use_signed_distance=True)
+    cands, weights = cands[keep], weights[keep]
+    picks = _greedy_select(cands, weights, n_new, previous_coords, rh, rv)
+
+    if verbose:
+        print(f"[adaptive] top-cap: z={z_cap:.3g}, candidates {len(cands)}, "
+              f"placed {len(picks)} (target {n_new})")
+    return picks

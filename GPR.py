@@ -281,6 +281,109 @@ def _region_rmse(points, sample_dat_shi, post_interp, prior_interp=None):
             prior_rmse = rmse(pri[vp], cfd_vel[vp])
     return prior_rmse, post_rmse, n
 
+
+# =============================================================================
+# Momentum-integral force (separate pass - never touches the grid arrays)
+# =============================================================================
+
+def compute_momentum_force(cylinder_geom, solver, v_inf,
+                           training_coords, ell, var, alpha, means_tests_dummy,
+                           p_gpr, posterior_batch,
+                           n_points=25000, include_top=True, include_bottom=False,
+                           bpa_L=10.0, midpoint=None, show_plot=False,
+                           prior_cache_dir="prior_cache"):
+    """Evaluate the momentum-balance surface force on the cylinder control volume.
+
+    This is a SELF-CONTAINED pass: it generates the momentum surface points, gets
+    their prior (panel solver, cached), GP velocity posterior, and pressure
+    posterior, then calls surface_force_bpa. It never appends to or reads the
+    res^3 grid, so plots and grid RMSE are unaffected.
+
+    The surface is fixed by the cylinder geometry (same every phase), so the prior
+    on it is cached separately from the grid prior and reused across phases. Only
+    the GP posterior changes per phase (training points accumulate) - exactly the
+    force-vs-#drones sweep we want.
+
+    Returns dict: {"force", "mesh", "pcd", "points", "velocity", "pressure", "n"}.
+    """
+    from momentum.sampler_momentum import sample_cylinder_uniform
+    from momentum.momentum_open import surface_force_bpa
+
+    R = float(cylinder_geom["R"])
+    p1 = np.asarray(cylinder_geom["bottom_center"], float)
+    p2 = np.asarray(cylinder_geom["top_center"], float)
+
+    # --- momentum surface points (fixed by geometry) ---
+    region_points = sample_cylinder_uniform(
+        p1=p1, p2=p2, R=R, n=n_points, top=include_top, bottom=include_bottom)
+    region_points = np.asarray(region_points, float)
+    n_mom = region_points.shape[0]
+
+    # --- prior on the surface (panel solver), cached by geometry ---
+    os.makedirs(prior_cache_dir, exist_ok=True)
+    geo_key = (f"R{R:g}_b{p1[0]:g}_{p1[1]:g}_{p1[2]:g}"
+               f"_t{p2[0]:g}_{p2[1]:g}_{p2[2]:g}_n{n_mom}"
+               f"_top{int(include_top)}_bot{int(include_bottom)}"
+               f"_vinf{v_inf[0]:g}_{v_inf[1]:g}_{v_inf[2]:g}")
+    mom_prior_file = os.path.join(prior_cache_dir, f"momentum_prior_{geo_key}.pkl")
+    if os.path.exists(mom_prior_file):
+        with open(mom_prior_file, "rb") as f:
+            mom_prior = pickle.load(f)
+        if mom_prior.shape != (n_mom, 3):
+            raise RuntimeError(
+                f"Cached momentum prior {mom_prior.shape} != {(n_mom, 3)}; "
+                f"delete {mom_prior_file} and rerun.")
+        print(f"loaded cached momentum-surface prior ({n_mom} pts)", flush=True)
+    else:
+        print(f"computing momentum-surface prior via Julia ({n_mom} pts)...", flush=True)
+        mom_prior = np.empty((n_mom, 3), dtype=float)
+        for i in range(0, n_mom, posterior_batch):
+            chunk = region_points[i:i + posterior_batch]
+            mom_prior[i:i + posterior_batch] = solver.velocity(
+                chunk, blank_interior=True).reshape(-1, 3)
+        with open(mom_prior_file, "wb") as f:
+            pickle.dump(mom_prior, f)
+        print(f"saved momentum-surface prior cache", flush=True)
+
+    # --- GP velocity posterior on the surface (separate batched pass) ---
+    mom_vel = posterior_mean_batched(
+        region_points, training_coords, ell, var, alpha, mom_prior,
+        batch=posterior_batch, progress_every=0)
+    mom_vel = np.asarray(mom_vel).reshape(-1, 3)
+
+    # --- pressure posterior on the surface ---
+    mom_p = predict_batched(p_gpr, region_points, batch=posterior_batch) \
+        if p_gpr is not None else np.zeros(n_mom)
+
+    # --- surface force via momentum balance ---
+    if midpoint is None:
+        midpoint = 0.5 * (p1 + p2)
+    FORCE, mesh, pcd = surface_force_bpa(
+        region_points, midpoint, mom_vel, mom_p, L=bpa_L)
+
+    if show_plot:
+        _show_momentum_plot(mesh, pcd)
+
+    return {"force": np.asarray(FORCE, float), "mesh": mesh, "pcd": pcd,
+            "points": region_points, "velocity": mom_vel, "pressure": mom_p,
+            "n": n_mom}
+
+
+def _show_momentum_plot(mesh, pcd):
+    """Optional pyvista view of the momentum surface (his original visualization)."""
+    try:
+        import pyvista
+    except Exception:
+        print("pyvista not available - skipping momentum plot", flush=True)
+        return
+    plotter = pyvista.Plotter()
+    plotter.add_mesh(mesh, scalars="pressure")
+    arrows = mesh.glyph(orient="Normals", scale=False, factor=5)
+    plotter.add_mesh(arrows, color="red")
+    plotter.show()
+    plotter.close()
+
+
 # =============================================================================
 # Sampling defaults per method
 # =============================================================================
@@ -321,7 +424,14 @@ def run_gpr(
     cylinder_geom_override=None,
     rmse_n_theta=120,
     rmse_n_z=40,
-    rmse_n_r=5):
+    rmse_n_r=5,
+    compute_force=True,
+    momentum_n_points=25000,
+    momentum_include_top=True,
+    momentum_include_bottom=False,
+    momentum_bpa_L=10.0,
+    momentum_midpoint=None,
+    momentum_show_plot=False):
 
     v_inf = np.asarray(v_inf, dtype=float)
 
@@ -590,7 +700,32 @@ def run_gpr(
             valid_p = ~np.isnan(cfd_p)
             pressure_test_rmse = rmse(pressure_posterior[valid_p], cfd_p[valid_p])
         bar()
-        
+
+        # --- Momentum-integral surface force (SEPARATE pass, never touches grid) ---
+        momentum_result = None
+        force_vec = None
+        force_mag = None
+        geom_for_force = cylinder_geom if cylinder_geom is not None else cylinder_geom_override
+        if compute_force and geom_for_force is not None:
+            try:
+                p_gpr_local = p_gpr if fit_pressure else None
+                momentum_result = compute_momentum_force(
+                    geom_for_force, solver, v_inf,
+                    training_coords, ell, var, alpha, None,
+                    p_gpr_local, posterior_batch,
+                    n_points=momentum_n_points,
+                    include_top=momentum_include_top,
+                    include_bottom=momentum_include_bottom,
+                    bpa_L=momentum_bpa_L, midpoint=momentum_midpoint,
+                    show_plot=momentum_show_plot)
+                force_vec = momentum_result["force"]
+                force_mag = float(np.linalg.norm(force_vec))
+                print(f"momentum force: |F|={force_mag:.6g}  F={np.asarray(force_vec)}",
+                      flush=True)
+            except Exception as e:
+                print(f"WARNING: momentum force failed ({e}); continuing without it.",
+                      flush=True)
+
         metrics = {
             "training_point_n": training_point_n,
             "prior_train_rmse": prior_train_rmse,
@@ -613,6 +748,9 @@ def run_gpr(
             "face_n": face_n,
             "rel_post_face_rmse": (post_face_rmse / max(truth_test_rms, 1e-12)
                                    if post_face_rmse is not None else None),
+            "force_vec": (force_vec.tolist() if force_vec is not None else None),
+            "force_mag": force_mag,
+            "momentum_n": (momentum_result["n"] if momentum_result is not None else 0),
         }
         bar.text('Done!')
     
@@ -632,6 +770,7 @@ def run_gpr(
         "metrics": metrics,
         'V_inf': v_inf,
         "cylinder_geom": cylinder_geom,
+        "momentum": momentum_result,   # {force, mesh, pcd, points, velocity, pressure, n} or None
         # --- additive: exposed for adaptive sampling (cheap local re-evaluation) ---
         "ell": np.asarray(ell, dtype=float),
         "var": float(var),

@@ -275,7 +275,8 @@ def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
 
 
 def save_all(result, out_dir="plots", phase_label="phase0",
-             z_slice_target=2.5, n_slices=5, show=False, close_after=True):
+             z_slice_target=2.5, n_slices=5, show=False, close_after=True,
+             true_force=None):
     """Build the standard figure set and save them to one multi-page PDF per phase.
 
     Each call writes  {out_dir}/{phase_label}.pdf  with one figure per page, so
@@ -314,13 +315,19 @@ def save_all(result, out_dir="plots", phase_label="phase0",
     shl = m.get("post_shell_rmse"); shl_rel = m.get("rel_post_shell_rmse")
     fac = m.get("post_face_rmse"); fac_rel = m.get("rel_post_face_rmse")
     pres = m.get("pressure_test_rmse")
+    fmag = m.get("force_mag"); fvec = m.get("force_vec")
+
+    def _fvec(v):
+        if v is None:
+            return "n/a"
+        return "[" + ", ".join(f"{c:.4g}" for c in v) + "]"
 
     header = f"{phase_label}  |  {n_train} training pts"
     rmse_lines = [
         f"velocity RMSE   1) whole domain: {_fmt(dom)} (rel {_fmt(dom_rel)})   "
         f"2) thick cylinder: {_fmt(shl)} (rel {_fmt(shl_rel)})   "
         f"3) on cylinder: {_fmt(fac)} (rel {_fmt(fac_rel)})",
-        f"pressure RMSE: {_fmt(pres)}",
+        f"pressure RMSE: {_fmt(pres)}    momentum force |F|: {_fmt(fmag)}",
     ]
     annot = header + "\n" + "\n".join(rmse_lines)
 
@@ -340,6 +347,19 @@ def save_all(result, out_dir="plots", phase_label="phase0",
         f"  2. thick cylinder  : {_fmt(shl)}    (rel {_fmt(shl_rel)})    [{m.get('shell_n','?')} pts]",
         f"  3. on the cylinder : {_fmt(fac)}    (rel {_fmt(fac_rel)})    [{m.get('face_n','?')} pts]",
         "", f"  Pressure RMSE      : {_fmt(pres)}",
+        "", "Momentum-integral force:",
+        f"  |F|                : {_fmt(fmag)}    [{m.get('momentum_n','?')} surface pts]",
+        f"  F vector           : {_fvec(fvec)}",
+    ]
+    if true_force is not None:
+        import numpy as _np
+        tf = _np.asarray(true_force, float)
+        lines.append(f"  F true             : {_fvec(tf.tolist())}    |F_true|={_np.linalg.norm(tf):.6g}")
+        if fvec is not None:
+            err = _np.asarray(fvec, float) - tf
+            rel = _np.linalg.norm(err) / max(_np.linalg.norm(tf), 1e-12)
+            lines.append(f"  force error dF     : {_fvec(err.tolist())}    rel={rel:.4g}")
+    lines += [
         "", "", "Prior (potential-flow baseline) for reference:",
         f"  whole domain prior : {_fmt(m.get('prior_test_rmse'))}",
         f"  thick cyl prior    : {_fmt(m.get('prior_shell_rmse'))}",
@@ -361,3 +381,51 @@ def save_all(result, out_dir="plots", phase_label="phase0",
         for f in figs:
             plt.close(f)
     return pdf_path
+
+
+def plot_force_convergence(force_curve, true_force=None, out_dir="plots",
+                           filename="force_convergence.pdf", show=False):
+    """Plot the three force components (Fx, Fy, Fz) across phases vs # drones.
+
+    force_curve: list of (n_drones, force_mag, force_vec) tuples, one per phase.
+    Each component gets its own panel with the true value drawn as a dashed line,
+    and every point is annotated with its drone count.
+    """
+    import os
+    rows = [(n, fm, fv) for (n, fm, fv) in force_curve if fv is not None]
+    if not rows:
+        print("plot_force_convergence: no force data to plot.")
+        return None
+
+    ns = np.array([r[0] for r in rows])
+    F = np.array([r[2] for r in rows], dtype=float)   # (phases, 3)
+
+    fig, axes = plt.subplots(3, 1, figsize=(9, 10), sharex=True)
+    labels = ["Fx", "Fy", "Fz"]
+    colors = ["#5DCAA5", "#85B7EB", "#EF9F27"]
+    for k, (ax, lab, col) in enumerate(zip(axes, labels, colors)):
+        ax.plot(ns, F[:, k], "-o", color=col, label=lab, linewidth=1.8, markersize=6)
+        if true_force is not None:
+            tv = float(np.asarray(true_force, float)[k])
+            ax.axhline(tv, ls="--", color="0.6", linewidth=1.2,
+                       label=f"true {lab}={tv:.4g}")
+        # annotate drone counts at each point
+        for xi, yi in zip(ns, F[:, k]):
+            ax.annotate(f"{xi}", (xi, yi), textcoords="offset points",
+                        xytext=(0, 8), ha="center", fontsize=8, color="0.75")
+        ax.set_ylabel(f"{lab}  [N]")
+        ax.legend(loc="best", fontsize=9)
+        ax.grid(True, alpha=0.2)
+    axes[-1].set_xlabel("number of training drones")
+    axes[0].set_title("Momentum force convergence vs # drones", fontsize=12)
+    fig.tight_layout()
+
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, filename)
+    fig.savefig(path, facecolor=fig.get_facecolor())
+    print(f"saved force-convergence plot -> {path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return path
