@@ -328,11 +328,17 @@ def run_gpr(
                 )
             print(f"loaded cached grid prior from {prior_file} (skipping Julia)", flush=True)
         else:
-            tolerance = False
+            tolerance = True
             if tolerance:
-                near_tol = 0.01 * solver.diag
+                near_tol = 0.03 * solver.diag
                 print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
             means_tests = np.empty((n_test, 3), dtype=float)
+
+            # after solver is built, before the prior loop:
+            test_pt = solver.mesh.bounds.mean(axis=0).reshape(1, 3)  # a point at the mesh center → should be inside
+            print("contains center:", solver.mesh.contains(test_pt))   # expect [True]
+            print("is_watertight:", solver.mesh.is_watertight)
+            print("is_winding_consistent:", solver.mesh.is_winding_consistent)
             for ci, i in enumerate(range(0, n_test, posterior_batch)):
                 chunk = test_points[i:i + posterior_batch]
                 if tolerance:
