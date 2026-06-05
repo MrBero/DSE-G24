@@ -10,7 +10,7 @@ def main():
         stl_scale=1.0 / 1000.0,
         # stl_rotate=-np.pi/2,
         res=30,
-        v_inf=(12.0, 0.0, 0.0),
+        v_inf=(0.0, 12.0, 0.0),
         # bounds_input=np.array([[-100,100],[75,275],[0,50]]),
         n_restarts=6,
         fit_pressure=True,

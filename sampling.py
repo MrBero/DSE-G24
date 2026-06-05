@@ -51,6 +51,7 @@ def _mesh_reject_mask(points, stl_mesh, epsilon=0.02, use_signed_distance=True):
 def _oblique_cylinder_points(stl_mesh,
                              r_factor,
                              h_factor,
+                             v_inf,
                              tilt_deg=23.0,
                              clearance=0.1,
                              n_points=300,
@@ -59,8 +60,18 @@ def _oblique_cylinder_points(stl_mesh,
                              seed=7):
 
     V = np.asarray(stl_mesh.vertices)
-    width_body = V[:, 1].max() - V[:, 1].min()
-    height_body = V[:, 2].max() - V[:, 2].min()
+
+    # downstream (streamwise) and cross-wind unit vectors in the horizontal plane
+    v = np.asarray(v_inf, float)
+    s = np.array([v[0], v[1], 0.0])
+    n = np.linalg.norm(s)
+    if n < 1e-12:
+        raise ValueError("v_inf has no horizontal component; cannot define wake direction.")
+    s = s / n                              # downstream (+wake) direction
+    c = np.array([-s[1], s[0], 0.0])       # cross-wind direction (horizontal)
+
+    width_body = (V @ c).max() - (V @ c).min()   # cross-wind width
+    height_body = V[:, 2].max() - V[:, 2].min()  # vertical height
     char_size = max(width_body, height_body)
 
     R = r_factor * char_size
@@ -69,32 +80,42 @@ def _oblique_cylinder_points(stl_mesh,
     z_lo = V[:, 2].min()
     z_hi = V[:, 2].max()
     z_mid = 0.5 * (z_lo + z_hi)
-    cx = 0.5 * (V[:, 0].min() + V[:, 0].max())
-    cy = 0.5 * (V[:, 1].min() + V[:, 1].max())
+
+    P0 = np.array([0.5 * (V[:, 0].min() + V[:, 0].max()),
+                   0.5 * (V[:, 1].min() + V[:, 1].max())])   # horizontal center
 
     shift_per_height = np.tan(np.radians(tilt_deg))
     z_bottom = z_lo + clearance
-    bottom_cx = cx + shift_per_height * (z_bottom - z_mid)
+    z_top = z_bottom + H
+
+    def ring_center_xy(z):
+        return P0 + shift_per_height * (z - z_mid) * s[:2]   # leans downstream with height
+
+    bottom_center = np.array([*ring_center_xy(z_bottom), z_bottom])
+    top_center = np.array([*ring_center_xy(z_top), z_top])
 
     half = np.radians(front_half_angle_deg)
     n_front = int(round(front_frac * n_points))
     n_back = n_points - n_front
 
-    def shell_lhs(n, phi_min, phi_max, sd):
-        if n <= 0:
+    def shell_lhs(nn, phi_min, phi_max, sd):
+        if nn <= 0:
             return np.empty((0, 3))
-        u = qmc.LatinHypercube(d=2, seed=sd).random(n)
+        u = qmc.LatinHypercube(d=2, seed=sd).random(nn)
         phi = phi_min + u[:, 0] * (phi_max - phi_min)
         z = z_bottom + u[:, 1] * H
-        ring_cx = bottom_cx + shift_per_height * (z - z_bottom)
-        x = ring_cx + R * np.cos(phi)
-        y = cy + R * np.sin(phi)
-        return np.column_stack([x, y, z])
+        rc = P0[None, :] + shift_per_height * (z - z_mid)[:, None] * s[None, :2]
+        # phi=0 -> +s (downstream wake); sweep into cross-wind via c
+        offset = R * (np.cos(phi)[:, None] * s[None, :2] + np.sin(phi)[:, None] * c[None, :2])
+        xy = rc + offset
+        return np.column_stack([xy[:, 0], xy[:, 1], z])
 
-    # phi ~ 0 is the wake (+x) side; front band is the wake wedge.
+    # phi ~ 0 is the wake side; this wedge gets the dense sampling.
     front = shell_lhs(n_front, -half, half, seed)
     back = shell_lhs(n_back, half, 2.0 * np.pi - half, seed + 1)
-    return np.vstack([front, back])
+    points = np.vstack([front, back])
+
+    return points, R, bottom_center, top_center
 
 
 def _drone_array_points(stl_mesh,
@@ -265,6 +286,7 @@ def sample(
     samples=None,
     sample_method="CSV",
     sample_config=None,
+    v_inf=None,
     epsilon=0.02,
     num_samples=150,
     use_signed_distance=True,
@@ -273,6 +295,7 @@ def sample(
 ):
     method = sample_method
     config = sample_config
+    cylinder_geom = None  
 
     # ---- load CFD field: support both .csv and .pkl/.pickle ----
     ext = os.path.splitext(field_path)[1].lower()
@@ -330,7 +353,12 @@ def sample(
             raise RuntimeError("drone_array produced no valid points.")
 
     elif method == "cylinder":
-        points = reject(_oblique_cylinder_points(stl_mesh, **(config or {})))
+        if v_inf is None:
+            raise ValueError("v_inf is required for cylinder sampling.")
+        cyl_pts, R, bottom_center, top_center = _oblique_cylinder_points(
+            stl_mesh, v_inf=v_inf, **(config or {}))
+        cylinder_geom = {"R": R, "bottom_center": bottom_center, "top_center": top_center}
+        points = reject(cyl_pts)
         if len(points) == 0:
             raise RuntimeError("cylinder produced no valid points.")
 
@@ -395,4 +423,4 @@ def sample(
     if len(df) == 0:
         raise RuntimeError("All sampled points became NaN after interpolation.")
 
-    return df, bounds, sample_dat_shi
+    return df, bounds, sample_dat_shi, cylinder_geom

@@ -278,8 +278,9 @@ def run_gpr(
 
         bar.text('Sampling...')
         # --- Sample training data ---
-        ground_truth, bounds, sample_dat_shi = sample(
-        cfd_filepath, stl_mesh, sample_method=sample_method, num_samples=num_samples, sample_config=sample_config,
+        ground_truth, bounds, sample_dat_shi, cylinder_geom = sample(                           #BIKTOR HERE IS GEOMETRY
+        cfd_filepath, stl_mesh, sample_method=sample_method, num_samples=num_samples,
+        sample_config=sample_config, v_inf=v_inf,
         epsilon=0.02, use_signed_distance=True,)
     
         if bounds_input is not None:
@@ -473,7 +474,8 @@ def run_gpr(
         "mesh_vertices": np.asarray(solver.mesh.vertices),
         "fit": fit,
         "metrics": metrics,
-        'V_inf': v_inf
+        'V_inf': v_inf,
+        "cylinder_geom": cylinder_geom,
     }
 
 
