@@ -220,6 +220,67 @@ def predict_batched(estimator, test_points, batch=4000):
 def ts():
     return time.perf_counter()
 
+
+def _structured_shell_points(cylinder_geom, r_lo_frac, r_hi_frac,
+                             n_theta=120, n_z=40, n_r=5):
+    """Build a structured set of points filling a thick tilted-cylinder shell.
+
+    The cylinder is the oblique one from sampling._oblique_cylinder_points:
+    horizontal circular rings whose centers lean downstream with height. The
+    shell spans radius [r_lo_frac, r_hi_frac] * R. Returns (N,3) coordinates on a
+    regular (theta, z, radius) lattice - grid-INDEPENDENT, so the RMSE region is
+    identical across phases regardless of res.
+    """
+    bc = np.asarray(cylinder_geom["bottom_center"], float)
+    tc = np.asarray(cylinder_geom["top_center"], float)
+    Rc = float(cylinder_geom["R"])
+    z_b, z_t = bc[2], tc[2]
+    z_mid = 0.5 * (z_b + z_t)
+    dz_full = max(z_t - z_b, 1e-12)
+    shift_per_dz = (tc[:2] - bc[:2]) / dz_full
+    P0 = bc[:2] - shift_per_dz * (z_b - z_mid)
+
+    thetas = np.linspace(0, 2 * np.pi, n_theta, endpoint=False)
+    zs = np.linspace(z_b, z_t, n_z)
+    if n_r > 1:
+        radii = np.linspace(r_lo_frac * Rc, r_hi_frac * Rc, n_r)
+    else:
+        radii = np.array([0.5 * (r_lo_frac + r_hi_frac) * Rc])
+
+    TT, ZZ, RR = np.meshgrid(thetas, zs, radii, indexing="ij")
+    TT, ZZ, RR = TT.ravel(), ZZ.ravel(), RR.ravel()
+    rc = P0[None, :] + (ZZ - z_mid)[:, None] * shift_per_dz[None, :]
+    x = rc[:, 0] + RR * np.cos(TT)
+    y = rc[:, 1] + RR * np.sin(TT)
+    return np.column_stack([x, y, ZZ])
+
+
+def _region_rmse(points, sample_dat_shi, post_interp, prior_interp=None):
+    """Evaluate CFD truth (via sample_dat_shi) and GPR posterior (via interpolator)
+    at arbitrary points, return (prior_rmse, post_rmse, n_valid).
+
+    Reuses the EXISTING functions: sample_dat_shi for the CFD ground truth, and a
+    trilinear interpolator over the already-computed posterior grid. No new GP
+    solves, no panel-solver calls.
+    """
+    if len(points) == 0:
+        return None, None, 0
+    cfd = sample_dat_shi(points)
+    cfd_vel = np.asarray(cfd)[:, :3]
+    post = np.asarray(post_interp(points))
+    valid = (~np.any(np.isnan(cfd_vel), axis=1)) & np.all(np.isfinite(post), axis=1)
+    n = int(valid.sum())
+    if n == 0:
+        return None, None, 0
+    post_rmse = rmse(post[valid], cfd_vel[valid])
+    prior_rmse = None
+    if prior_interp is not None:
+        pri = np.asarray(prior_interp(points))
+        vp = valid & np.all(np.isfinite(pri), axis=1)
+        if vp.any():
+            prior_rmse = rmse(pri[vp], cfd_vel[vp])
+    return prior_rmse, post_rmse, n
+
 # =============================================================================
 # Sampling defaults per method
 # =============================================================================
@@ -251,8 +312,16 @@ def run_gpr(
     fit_pressure=True,
     sample_method="cylinder",
     sample_config=None,
+    samples=None,
     num_samples=150,
-    compute_variance=True):
+    compute_variance=True,
+    var_res=None,
+    rmse_shell_frac=0.3,
+    rmse_face_halfwidth=0.05,
+    cylinder_geom_override=None,
+    rmse_n_theta=120,
+    rmse_n_z=40,
+    rmse_n_r=5):
 
     v_inf = np.asarray(v_inf, dtype=float)
 
@@ -281,7 +350,7 @@ def run_gpr(
         # --- Sample training data ---
         ground_truth, bounds, sample_dat_shi, cylinder_geom = sample(                           #BIKTOR HERE IS GEOMETRY
         cfd_filepath, stl_mesh, sample_method=sample_method, num_samples=num_samples,
-        sample_config=sample_config, v_inf=v_inf,
+        sample_config=sample_config, samples=samples, v_inf=v_inf,
         epsilon=0.02, use_signed_distance=True,)
     
         if bounds_input is not None:
@@ -332,7 +401,7 @@ def run_gpr(
         else:
             tolerance = True
             if tolerance:
-                near_tol = 0.02 * solver.diag
+                near_tol = 0.03 * solver.diag
                 print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
             means_tests = np.empty((n_test, 3), dtype=float)
 
@@ -393,13 +462,37 @@ def run_gpr(
             batch=posterior_batch, progress_every=posterior_batch*10)
         GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
-        bar.text("Variance posterior (skipped)...")
-        compute_variance = True   # flip to True when you want uncertainty maps
+        bar.text("Variance posterior...")
         if compute_variance:
-            GPR_variances = posterior_vars_batched(
-                test_points, training_coords, ell, var, c, low,
-                batch=posterior_batch, progress_every=posterior_batch*10)
-            GPR_variances = np.array(GPR_variances).reshape(-1, 3)
+            if var_res is not None and var_res < res:
+                # --- coarse variance pass + trilinear interpolation up to res^3 ---
+                # Variance is the slow term, so evaluate it on a var_res^3 grid and
+                # interpolate back onto the full res^3 grid. PLOT.py reshapes every
+                # field with the single `res`, so the returned array MUST be res^3:
+                # interpolating up keeps that contract intact.
+                cgx = np.linspace(bounds[0, 0], bounds[0, 1], var_res)
+                cgy = np.linspace(bounds[1, 0], bounds[1, 1], var_res)
+                cgz = np.linspace(bounds[2, 0], bounds[2, 1], var_res)
+                cx, cy, cz = np.meshgrid(cgx, cgy, cgz, indexing="ij")
+                coarse_pts = np.stack([cx.ravel(), cy.ravel(), cz.ravel()], axis=-1)
+                print(f"variance: coarse grid {var_res}^3 = {coarse_pts.shape[0]:,} "
+                      f"pts (vs {res**3:,} full)", flush=True)
+
+                coarse_var = posterior_vars_batched(
+                    coarse_pts, training_coords, ell, var, c, low,
+                    batch=posterior_batch, progress_every=posterior_batch*10)
+                coarse_var = np.array(coarse_var).reshape(var_res, var_res, var_res, 3)
+
+                from scipy.interpolate import RegularGridInterpolator
+                interp = RegularGridInterpolator(
+                    (cgx, cgy, cgz), coarse_var,
+                    bounds_error=False, fill_value=None)  # None -> extrapolate edges
+                GPR_variances = interp(test_points).reshape(-1, 3)
+            else:
+                GPR_variances = posterior_vars_batched(
+                    test_points, training_coords, ell, var, c, low,
+                    batch=posterior_batch, progress_every=posterior_batch*10)
+                GPR_variances = np.array(GPR_variances).reshape(-1, 3)
         else:
             GPR_variances = np.full((test_points.shape[0], 3), np.nan)
 
@@ -417,11 +510,63 @@ def run_gpr(
         cfd_test_vels = cfd_test[:, :3]
         cfd_p = cfd_test[:, 3]
 
-        valid_cfd = ~np.any(np.isnan(cfd_test_vels), axis=1)
+        # A point is usable for velocity RMSE only if the CFD truth AND both
+        # predicted fields are finite there. Masking only the CFD truth (the old
+        # behavior) let a single NaN/Inf in the prior or posterior poison the
+        # whole metric -> post_test_rmse=nan.
+        valid_cfd = (
+            ~np.any(np.isnan(cfd_test_vels), axis=1)
+            & np.all(np.isfinite(means_tests), axis=1)
+            & np.all(np.isfinite(GPR_posterior), axis=1)
+        )
+        n_bad_pred = int((~np.all(np.isfinite(GPR_posterior), axis=1)).sum())
+        if n_bad_pred:
+            print(f"WARNING: {n_bad_pred} non-finite posterior points excluded "
+                  f"from RMSE (check var/noise bounds).", flush=True)
         truth = cfd_test_vels[valid_cfd]
         prior_test_rmse = rmse(means_tests[valid_cfd], truth)
         post_test_rmse = rmse(GPR_posterior[valid_cfd], truth)
         truth_test_rms = float(np.sqrt(np.mean(truth ** 2)))
+
+        # --- in-cylinder RMSE regions, evaluated on STRUCTURED points (not grid
+        #     cells), so the region is identical across phases regardless of res:
+        #       thick shell : (1-f)R .. (1+f)R   (force-integration volume)
+        #       on-face band: |rho - R| <= face_halfwidth*R  (exactly on the cylinder)
+        #     CFD truth comes from sample_dat_shi; the GPR posterior is trilinearly
+        #     interpolated from the grid posterior we already computed. ---
+        prior_shell_rmse = post_shell_rmse = None
+        prior_face_rmse = post_face_rmse = None
+        shell_n = face_n = 0
+        geom_for_rmse = cylinder_geom if cylinder_geom is not None else cylinder_geom_override
+        if geom_for_rmse is not None:
+            from scipy.interpolate import RegularGridInterpolator
+            gx_ = np.linspace(bounds[0, 0], bounds[0, 1], res)
+            gy_ = np.linspace(bounds[1, 0], bounds[1, 1], res)
+            gz_ = np.linspace(bounds[2, 0], bounds[2, 1], res)
+            post_grid = GPR_posterior.reshape(res, res, res, 3)
+            prior_grid = means_tests.reshape(res, res, res, 3)
+            post_interp = RegularGridInterpolator((gx_, gy_, gz_), post_grid,
+                                                  bounds_error=False, fill_value=np.nan)
+            prior_interp = RegularGridInterpolator((gx_, gy_, gz_), prior_grid,
+                                                   bounds_error=False, fill_value=np.nan)
+
+            f = rmse_shell_frac
+            fw = rmse_face_halfwidth
+            shell_pts = _structured_shell_points(
+                geom_for_rmse, 1 - f, 1 + f,
+                n_theta=rmse_n_theta, n_z=rmse_n_z, n_r=rmse_n_r)
+            face_pts = _structured_shell_points(
+                geom_for_rmse, 1 - fw, 1 + fw,
+                n_theta=rmse_n_theta, n_z=rmse_n_z, n_r=max(rmse_n_r // 2, 2))
+
+            prior_shell_rmse, post_shell_rmse, shell_n = _region_rmse(
+                shell_pts, sample_dat_shi, post_interp, prior_interp)
+            prior_face_rmse, post_face_rmse, face_n = _region_rmse(
+                face_pts, sample_dat_shi, post_interp, prior_interp)
+
+            print(f"RMSE regions (structured): thick shell {shell_n}/{len(shell_pts)} pts "
+                  f"(rho in [{(1-f):.2g},{(1+f):.2g}]*R), "
+                  f"on-face {face_n}/{len(face_pts)} pts (|rho-R|<={fw:.2g}*R)", flush=True)
         bar()
 
         bar.text('Pressure GPR...')
@@ -458,6 +603,16 @@ def run_gpr(
             "valid_cfd": int(valid_cfd.sum()),
             "n_test": int(len(valid_cfd)),
             "pressure_test_rmse": pressure_test_rmse,
+            "prior_shell_rmse": prior_shell_rmse,
+            "post_shell_rmse": post_shell_rmse,
+            "shell_n": shell_n,
+            "rel_post_shell_rmse": (post_shell_rmse / max(truth_test_rms, 1e-12)
+                                    if post_shell_rmse is not None else None),
+            "prior_face_rmse": prior_face_rmse,
+            "post_face_rmse": post_face_rmse,
+            "face_n": face_n,
+            "rel_post_face_rmse": (post_face_rmse / max(truth_test_rms, 1e-12)
+                                   if post_face_rmse is not None else None),
         }
         bar.text('Done!')
     
@@ -477,6 +632,13 @@ def run_gpr(
         "metrics": metrics,
         'V_inf': v_inf,
         "cylinder_geom": cylinder_geom,
+        # --- additive: exposed for adaptive sampling (cheap local re-evaluation) ---
+        "ell": np.asarray(ell, dtype=float),
+        "var": float(var),
+        "noise": float(noise),
+        "alpha": np.asarray(alpha, dtype=float),
+        "sample_dat_shi": sample_dat_shi,   # live CFD sampler closure
+        "stl_mesh": stl_mesh,               # for mesh-reject of proposed points
     }
 
 

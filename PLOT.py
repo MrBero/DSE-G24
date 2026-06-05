@@ -272,3 +272,92 @@ def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
     if show:
         plt.show()
     return figs
+
+
+def save_all(result, out_dir="plots", phase_label="phase0",
+             z_slice_target=2.5, n_slices=5, show=False, close_after=True):
+    """Build the standard figure set and save them to one multi-page PDF per phase.
+
+    Each call writes  {out_dir}/{phase_label}.pdf  with one figure per page, so
+    phases can be flipped through and compared side by side. The figures are the
+    SAME ones plot_all draws - this just routes them to a file instead of (or as
+    well as) the screen. Works regardless of how many training points the phase
+    used, because every plotted FIELD is still res^3; only the scattered training
+    coords change, and those are never reshaped.
+
+    Returns the path to the written PDF.
+    """
+    import os
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    os.makedirs(out_dir, exist_ok=True)
+    pdf_path = os.path.join(out_dir, f"{phase_label}.pdf")
+
+    figs = [
+        plot_posterior_3d(result),
+        plot_slice_comparison(result, z_slice_target),
+        plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z", slice_range=(5, 50)),
+        plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z", slice_range=(5, 50)),
+    ]
+    pf = plot_pressure_slice(result, z_slice_target)
+    if pf is not None:
+        figs.append(pf)
+
+    # ---- build the 3-RMSE annotation text ----
+    n_train = len(np.asarray(result["training_coords"]))
+    m = result.get("metrics", {})
+
+    def _fmt(v):
+        return f"{v:.4g}" if isinstance(v, (int, float)) and v is not None else "n/a"
+
+    dom = m.get("post_test_rmse"); dom_rel = m.get("rel_post_test_rmse")
+    shl = m.get("post_shell_rmse"); shl_rel = m.get("rel_post_shell_rmse")
+    fac = m.get("post_face_rmse"); fac_rel = m.get("rel_post_face_rmse")
+    pres = m.get("pressure_test_rmse")
+
+    header = f"{phase_label}  |  {n_train} training pts"
+    rmse_lines = [
+        f"velocity RMSE   1) whole domain: {_fmt(dom)} (rel {_fmt(dom_rel)})   "
+        f"2) thick cylinder: {_fmt(shl)} (rel {_fmt(shl_rel)})   "
+        f"3) on cylinder: {_fmt(fac)} (rel {_fmt(fac_rel)})",
+        f"pressure RMSE: {_fmt(pres)}",
+    ]
+    annot = header + "\n" + "\n".join(rmse_lines)
+
+    # corner annotation on every page
+    for f in figs:
+        f.text(0.01, 0.99, annot, ha="left", va="top", fontsize=8,
+               color="0.8", family="monospace")
+
+    # dedicated summary page at the FRONT of the PDF
+    summary = plt.figure(figsize=(11, 8.5))
+    summary.patch.set_facecolor("black")
+    ax = summary.add_subplot(111); ax.axis("off")
+    lines = [
+        header, "",
+        "Velocity RMSE (absolute  |  relative to truth-RMS):", "",
+        f"  1. whole domain    : {_fmt(dom)}    (rel {_fmt(dom_rel)})    [{m.get('valid_cfd','?')} cells]",
+        f"  2. thick cylinder  : {_fmt(shl)}    (rel {_fmt(shl_rel)})    [{m.get('shell_n','?')} pts]",
+        f"  3. on the cylinder : {_fmt(fac)}    (rel {_fmt(fac_rel)})    [{m.get('face_n','?')} pts]",
+        "", f"  Pressure RMSE      : {_fmt(pres)}",
+        "", "", "Prior (potential-flow baseline) for reference:",
+        f"  whole domain prior : {_fmt(m.get('prior_test_rmse'))}",
+        f"  thick cyl prior    : {_fmt(m.get('prior_shell_rmse'))}",
+        f"  on cylinder prior  : {_fmt(m.get('prior_face_rmse'))}",
+    ]
+    ax.text(0.05, 0.95, "\n".join(lines), ha="left", va="top",
+            fontsize=13, color="white", family="monospace",
+            transform=ax.transAxes)
+    figs = [summary] + figs
+
+    with PdfPages(pdf_path) as pdf:
+        for f in figs:
+            pdf.savefig(f, facecolor=f.get_facecolor())
+    print(f"saved {len(figs)}-page figure set -> {pdf_path}")
+
+    if show:
+        plt.show()
+    if close_after:
+        for f in figs:
+            plt.close(f)
+    return pdf_path
