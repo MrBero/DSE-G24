@@ -20,7 +20,7 @@ def main():
         # num_samples=120
         #Cylinder
         sample_method="cylinder",
-        sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
+        sample_config={"r_factor": .8, "h_factor": 1.5, "tilt_deg": 0,
                     "n_points": 160, "front_frac": 0.25, "front_half_angle_deg": 45}
         # Drone array
         # sample_method="drone_array",
