@@ -328,10 +328,17 @@ def run_gpr(
                 )
             print(f"loaded cached grid prior from {prior_file} (skipping Julia)", flush=True)
         else:
+            tolerance = False
+            if tolerance:
+                near_tol = 0.01 * solver.diag
+                print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
             means_tests = np.empty((n_test, 3), dtype=float)
             for ci, i in enumerate(range(0, n_test, posterior_batch)):
                 chunk = test_points[i:i + posterior_batch]
-                means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
+                if tolerance:
+                    means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True, blank_near=True, near_tol=near_tol).reshape(-1, 3)
+                else:
+                    means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
                 if (ci % 50 == 0 or ci == n_chunks - 1):
                     print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
             with open(prior_file, "wb") as f:
@@ -378,13 +385,15 @@ def run_gpr(
             batch=posterior_batch, progress_every=posterior_batch*10)
         GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
-        bar.text(f"Variance posterior over grid ({n_chunks} chunks)...")
-        # Variance is streamed per chunk straight from the Cholesky factors; no
-        # full-grid K_test or beta is ever formed (that was the OOM).
-        GPR_variances = posterior_vars_batched(
-            test_points, training_coords, ell, var, c, low,
-            batch=posterior_batch, progress_every=posterior_batch*10)
-        GPR_variances = np.array(GPR_variances).reshape(-1, 3)
+        bar.text("Variance posterior (skipped)...")
+        compute_variance = False   # flip to True when you want uncertainty maps
+        if compute_variance:
+            GPR_variances = posterior_vars_batched(
+                test_points, training_coords, ell, var, c, low,
+                batch=posterior_batch, progress_every=posterior_batch*10)
+            GPR_variances = np.array(GPR_variances).reshape(-1, 3)
+        else:
+            GPR_variances = np.full((test_points.shape[0], 3), np.nan)
 
         # Training reconstruction check
         K_signal = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=0.0, jitter=0.0)
