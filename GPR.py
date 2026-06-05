@@ -251,7 +251,8 @@ def run_gpr(
     fit_pressure=True,
     sample_method="cylinder",
     sample_config=None,
-    num_samples=150):
+    num_samples=150,
+    compute_variance=True):
 
     v_inf = np.asarray(v_inf, dtype=float)
 
@@ -330,7 +331,7 @@ def run_gpr(
         else:
             tolerance = True
             if tolerance:
-                near_tol = 0.03 * solver.diag
+                near_tol = 0.02 * solver.diag
                 print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
             means_tests = np.empty((n_test, 3), dtype=float)
 
@@ -391,8 +392,7 @@ def run_gpr(
             batch=posterior_batch, progress_every=posterior_batch*10)
         GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
-        bar.text("Variance posterior (skipped)...")
-        compute_variance = False   # flip to True when you want uncertainty maps
+        bar.text("Variance posterior")
         if compute_variance:
             GPR_variances = posterior_vars_batched(
                 test_points, training_coords, ell, var, c, low,
