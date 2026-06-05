@@ -53,8 +53,8 @@ def compute_forces(
 
     v_dot_n = (v * n).sum(axis=1, keepdims=True)
 
-    mesh.cell_data["pressure_force"] = p[:, np.newaxis] * n
-    mesh.cell_data["momentum_force"] = rho * v * v_dot_n
+    mesh.cell_data["pressure_force"] = -p[:, np.newaxis] * n
+    mesh.cell_data["momentum_force"] = -rho * v * v_dot_n
     mesh.cell_data["total_force"]    = mesh.cell_data["pressure_force"] + mesh.cell_data["momentum_force"]
 
     F = mesh.integrate_data().cell_data["total_force"][0]

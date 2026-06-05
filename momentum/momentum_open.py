@@ -91,7 +91,7 @@ def surface_force_bpa(
 
     # 3. Compute dot product and force per cell area
     v_dot_n = np.sum(v * n, axis=1, keepdims=True)
-    mesh_pv.cell_data["total_force"] = (p[:, np.newaxis] * n) + (rho * v * v_dot_n)
+    mesh_pv.cell_data["total_force"] = -(p[:, np.newaxis] * n) - (rho * v * v_dot_n)
     
     # 4. Integrate total force over surface area
     F = mesh_pv.integrate_data().cell_data["total_force"][0]
