@@ -283,6 +283,23 @@ def run_gpr(
         cfd_filepath, stl_mesh, sample_method=sample_method, num_samples=num_samples,
         sample_config=sample_config, v_inf=v_inf,
         epsilon=0.02, use_signed_distance=True,)
+
+        #-------- POINTS FOR MOMENTUM EQUATION Viktor -------- x
+        from momentum.sampler_momentum import sample_cylinder_uniform
+        RadiusCyl = cylinder_geom['R']
+        bottom_P = cylinder_geom['bottom_center'] 
+        top_P = cylinder_geom['top_center']
+
+        region_points = sample_cylinder_uniform(
+            p1=bottom_P,
+            p2=top_P,
+            R=RadiusCyl,
+            n=25_000,# Viktor CAN I GIVE IT 25_000
+            top=True,
+            bottom=False,
+        )
+
+
     
         if bounds_input is not None:
             bounds = bounds_input
@@ -302,6 +319,11 @@ def run_gpr(
         gz = np.linspace(bounds[2, 0], bounds[2, 1], res)
         x, y, z = np.meshgrid(gx, gy, gz, indexing="ij")
         test_points = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
+
+
+        len_momentum = region_points.shape[0]
+        test_points = np.concatenate([test_points, region_points], axis=0) # APPEND MOMENTUM POINTS TO STACK WIKTOR
+
         del x, y, z
         print(f'testing points: {test_points.shape[0]}')
         bar()
@@ -444,6 +466,23 @@ def run_gpr(
 
             valid_p = ~np.isnan(cfd_p)
             pressure_test_rmse = rmse(pressure_posterior[valid_p], cfd_p[valid_p])
+
+
+        momentum_pressure = pressure_posterior[-len_momentum:]
+        momentum_velocity = GPR_posterior[-len_momentum:]
+
+        from momentum.momentum_open import surface_force_bpa
+        MIDPOINT = np.array([
+            6524.591 / 1000,
+            1.213 * 10**5 / 10**3,
+            52.6 / 2
+        ])
+        FORCE, mesh, pcd = surface_force_bpa(region_points, MIDPOINT,momentum_velocity, momentum_pressure, L=10 )
+
+        print(FORCE)
+
+        # print(momentum_pressure[:5])
+        # print(momentum_velocity[:5])
         bar()
         
         metrics = {
