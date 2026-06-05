@@ -261,8 +261,10 @@ def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
     figs = [
         plot_posterior_3d(result),
         plot_slice_comparison(result, z_slice_target),
-        plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z", slice_range=(5,50)),
-        plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z", slice_range=(5,50))
+        # plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z", slice_range=(5,50)),
+        # plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z", slice_range=(5,50))
+        plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z"),
+        plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z")
     ]
     pf = plot_pressure_slice(result, z_slice_target)
     if pf is not None:

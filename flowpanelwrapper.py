@@ -1,14 +1,20 @@
 import os
 import atexit
-import select
 import struct
 import subprocess
 import tempfile
+import threading
+import queue
+import time
 
 import numpy as np
 import trimesh
 
-# Flow panel wrapper, credit to Claude Opus 4.8. It starts a Julia server to handle communication with FP.jl (implementation also credited to Claude Opus 4.8 to make use of the FlowPanel.jl library, credit to Eduardo J. Alvarez (main) and Cibin Joseph)
+# Flow panel wrapper, credit to Claude Opus 4.8. It starts a Julia server to
+# handle communication with FP.jl (implementation also credited to Claude Opus
+# 4.8 to make use of the FLOWPanel.jl library, credit to Eduardo J. Alvarez
+# (main) and Cibin Joseph)
+
 
 class FLOWPanelSolver:
     """
@@ -22,6 +28,13 @@ class FLOWPanelSolver:
     solves the panel system a single time, then streams query-point batches over
     stdin/stdout. Previously each velocity() call spawned a fresh Julia process
     (paying interpreter startup + JIT + re-solve every time).
+
+    Portability: the startup-readiness wait reads Julia's stderr on a background
+    thread instead of select.select(). select() does not work on pipe handles on
+    Windows (it accepts sockets only), which is why the previous version raised a
+    socket error there. The thread-based pump works identically on Windows, WSL,
+    and native Linux, and also keeps draining stderr for the life of the process
+    so Julia diagnostics can never fill the pipe buffer and deadlock the solver.
     """
 
     def __init__(
@@ -32,6 +45,7 @@ class FLOWPanelSolver:
         julia_bin="julia",
         verbose=True,
         max_julia_points=2_000_000,
+        startup_timeout=120.0,
     ):
         if isinstance(mesh, str):
             self.mesh = trimesh.load_mesh(mesh)
@@ -46,6 +60,9 @@ class FLOWPanelSolver:
         # same live process, so this is NOT per-process chunking — no startup
         # cost between frames.
         self._max_julia_points = int(max_julia_points)
+        # Generous by default: the first server start pays full package import +
+        # JIT compilation, which can take tens of seconds on a cold Julia.
+        self._startup_timeout = float(startup_timeout)
 
         self.diag = float(np.linalg.norm(self.mesh.extents))
 
@@ -55,6 +72,8 @@ class FLOWPanelSolver:
         self.mesh.export(self.stl_path)
 
         self._proc = None
+        self._stderr_thread = None
+        self._stderr_lines = None
         self._start_server()
         atexit.register(self.close)
 
@@ -88,39 +107,62 @@ class FLOWPanelSolver:
             bufsize=0,
         )
 
-        # Wait for readiness on stderr, but never block forever: poll the
-        # process and the stderr fd together. If Julia dies or goes quiet,
-        # surface everything it printed.
+        # Drain stderr on a background thread so reading it never blocks the main
+        # thread and never uses select() (which doesn't work on Windows pipes).
+        # The thread runs for the life of the process so Julia diagnostics don't
+        # fill and stall the stderr pipe buffer mid-evaluation.
+        self._stderr_lines = queue.Queue()
+
+        def _pump_stderr():
+            for raw in iter(self._proc.stderr.readline, b""):
+                text = raw.decode(errors="replace").rstrip()
+                self._stderr_lines.put(text)
+                if self._verbose and text:
+                    print(f"[julia] {text}", flush=True)
+
+        self._stderr_thread = threading.Thread(target=_pump_stderr, daemon=True)
+        self._stderr_thread.start()
+
+        # Wait for the readiness banner, but bail out if Julia dies or hangs.
+        deadline = time.monotonic() + self._startup_timeout
         collected = []
         ready = False
-        while True:
-            rc = self._proc.poll()
-            r, _, _ = select.select([self._proc.stderr], [], [], 0.5)
-            if r:
-                line = self._proc.stderr.readline()
-                if line:
-                    text = line.decode(errors="replace").rstrip()
-                    collected.append(text)
-                    if self._verbose and text:
-                        print(f"[julia] {text}", flush=True)
-                    if "FP.jl server ready" in text:
-                        ready = True
-                        break
-                    continue
-            if rc is not None:
-                # Process exited; drain remaining stderr.
-                rest = self._proc.stderr.read().decode(errors="replace")
-                if rest:
-                    collected.append(rest)
-                break
+        while time.monotonic() < deadline:
+            try:
+                text = self._stderr_lines.get(timeout=0.5)
+                collected.append(text)
+                if "FP.jl server ready" in text:
+                    ready = True
+                    break
+            except queue.Empty:
+                if self._proc.poll() is not None:
+                    break  # process exited before signalling ready
 
         if not ready:
             rc = self._proc.poll()
+            # Drain anything else the pump captured before raising.
+            while True:
+                try:
+                    collected.append(self._stderr_lines.get_nowait())
+                except queue.Empty:
+                    break
             raise RuntimeError(
                 f"Julia server failed to start (exit code {rc}).\n"
                 f"Command:\n{' '.join(cmd)}\n"
                 f"--- stderr ---\n" + "\n".join(collected)
             )
+
+    def _drain_stderr(self):
+        """Collect whatever stderr text the pump has buffered (non-blocking)."""
+        lines = []
+        if self._stderr_lines is None:
+            return ""
+        while True:
+            try:
+                lines.append(self._stderr_lines.get_nowait())
+            except queue.Empty:
+                break
+        return "\n".join(lines)
 
     def _read_exact(self, n):
         """Read exactly n bytes from the Julia stdout pipe or raise."""
@@ -129,12 +171,7 @@ class FLOWPanelSolver:
             chunk = self._proc.stdout.read(n - len(buf))
             if not chunk:
                 rc = self._proc.poll()
-                err = ""
-                if self._proc.stderr is not None:
-                    try:
-                        err = self._proc.stderr.read().decode(errors="replace")
-                    except Exception:
-                        pass
+                err = self._drain_stderr()
                 raise RuntimeError(
                     f"Julia server closed pipe mid-read (exit code {rc}).\n"
                     f"--- stderr ---\n{err}"

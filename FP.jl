@@ -25,7 +25,6 @@ function build_body(stl_path, V_inf)
     msh  = Meshes.SimpleMesh(points, connec)
     grid = pnl.gt.GridTriangleSurface(msh)
     body = pnl.NonLiftingBody{pnl.ConstantSource}(grid)
-
     Uinfs = repeat(V_inf, 1, body.ncells)
     pnl.solve(body, Uinfs)
     return body
@@ -41,11 +40,11 @@ end
 
 function run_oneshot(stl_path, V_inf, pts_file, out_file)
     body = build_body(stl_path, V_inf)
-    println("Panels: $(body.ncells)")
+    println(stderr, "Panels: $(body.ncells)")
     pts = NPZ.npzread(pts_file)
     out = eval_velocity(body, pts, V_inf)
     NPZ.npzwrite(out_file, out)
-    println("Saved $(size(pts, 1)) velocities -> $(out_file)")
+    println(stderr, "Saved $(size(pts, 1)) velocities -> $(out_file)")
 end
 
 function run_server(stl_path, V_inf)
@@ -54,7 +53,10 @@ function run_server(stl_path, V_inf)
     println(stderr, "FP.jl server ready")
     flush(stderr)
 
-    inp = stdin
+    # Use the raw binary handles explicitly. On Windows the default stdout can
+    # apply CRLF translation, which would corrupt the Float64 byte stream; the
+    # raw stdin/stdout below avoid any text-mode mangling on every platform.
+    inp  = stdin
     outp = stdout
 
     while true
@@ -66,16 +68,17 @@ function run_server(stl_path, V_inf)
         nb = N * 3 * 8
         raw = read(inp, nb)
         length(raw) < nb && break
-        flat = collect(reinterpret(Float64, raw))      # 3N
-        pts = permutedims(reshape(flat, 3, N))         # (N, 3)
 
-        out = eval_velocity(body, pts, V_inf)          # (N, 3)
-        out_flat = vec(permutedims(out))               # x0,y0,z0,...
+        flat = collect(reinterpret(Float64, raw))      # 3N
+        pts  = permutedims(reshape(flat, 3, N))         # (N, 3)
+        out  = eval_velocity(body, pts, V_inf)          # (N, 3)
+        out_flat = vec(permutedims(out))                # x0,y0,z0,...
 
         write(outp, reinterpret(UInt8, [Int64(N)]))
         write(outp, reinterpret(UInt8, collect(out_flat)))
         flush(outp)
     end
+
     println(stderr, "FP.jl server shutting down")
     flush(stderr)
 end
