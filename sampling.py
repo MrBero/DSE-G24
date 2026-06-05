@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import numpy.random as rnd
 import scipy as sp
@@ -272,8 +273,18 @@ def sample(
 ):
     method = sample_method
     config = sample_config
-    print('Reading csv...')
-    cfd = pd.read_pickle(field_path)
+
+    # ---- load CFD field: support both .csv and .pkl/.pickle ----
+    ext = os.path.splitext(field_path)[1].lower()
+    if ext in (".pkl", ".pickle"):
+        print('Reading pickle...')
+        cfd = pd.read_pickle(field_path)
+    elif ext == ".csv":
+        print('Reading csv...')
+        cfd = pd.read_csv(field_path)
+    else:
+        raise ValueError(f"Unsupported CFD file type {ext!r} (expected .csv or .pkl)")
+
     cfd.columns = cfd.columns.str.strip()
 
     required = [
@@ -286,16 +297,26 @@ def sample(
 
     print('Extracting coords & vals...')
     source_coords = cfd[["x-coordinate", "y-coordinate", "z-coordinate"]].to_numpy(float)
+    source_values = cfd[["x-velocity", "y-velocity", "z-velocity", "pressure"]].to_numpy(float)
 
     bounds = np.array([
         [source_coords[:, 0].min(), source_coords[:, 0].max()],
         [source_coords[:, 1].min(), source_coords[:, 1].max()],
         [source_coords[:, 2].min(), source_coords[:, 2].max()],
     ])
-    print("Building interpolator...")
-    
-    sample_dat_shi = build_cfd_sampler(cfd, n_points=8, sharpness=2)
-    del cfd
+
+    if ext == ".csv":
+        print("Building interpolator (griddata)...")
+        def sample_dat_shi(points):
+            return sp.interpolate.griddata(
+                source_coords, source_values, points,
+                method="linear", fill_value=np.nan,
+            )
+        del cfd
+    else:  # .pkl / .pickle large case
+        print("Building interpolator (fast KD-tree sampler)...")
+        sample_dat_shi = build_cfd_sampler(cfd, n_points=8, sharpness=2)
+        del cfd
 
     def reject(points):
         return points[_mesh_reject_mask(

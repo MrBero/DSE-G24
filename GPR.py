@@ -1,4 +1,5 @@
 import os
+import pickle
 
 # Force CPU before importing JAX.
 os.environ["JAX_PLATFORMS"] = "cpu"
@@ -307,12 +308,48 @@ def run_gpr(
         # --- Prior mean (panel solver), streamed over the grid ---
         n_test = test_points.shape[0]
         n_chunks = (n_test + posterior_batch - 1) // posterior_batch
-        means_tests = np.empty((n_test, 3), dtype=float)
-        for ci, i in enumerate(range(0, n_test, posterior_batch)):
-            chunk = test_points[i:i + posterior_batch]
-            means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
-            if (ci % 50 == 0 or ci == n_chunks - 1):
-                print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
+
+        # Cache the Julia prior on the grid. Valid as long as geometry + CFD
+        # bounds are unchanged; res and v_inf are encoded in the filename so
+        # changing either picks a different cache automatically.
+        os.makedirs("prior_cache", exist_ok=True)
+        prior_file = os.path.join(
+            "prior_cache",
+            f"grid_prior_res{res}_vinf{v_inf[0]:g}_{v_inf[1]:g}_{v_inf[2]:g}.pkl",
+        )
+
+        if os.path.exists(prior_file):
+            with open(prior_file, "rb") as f:
+                means_tests = pickle.load(f)
+            if means_tests.shape != (n_test, 3):
+                raise RuntimeError(
+                    f"Cached prior {means_tests.shape} != expected {(n_test, 3)}. "
+                    f"Delete {prior_file} and rerun."
+                )
+            print(f"loaded cached grid prior from {prior_file} (skipping Julia)", flush=True)
+        else:
+            tolerance = True
+            if tolerance:
+                near_tol = 0.03 * solver.diag
+                print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
+            means_tests = np.empty((n_test, 3), dtype=float)
+
+            # after solver is built, before the prior loop:
+            test_pt = solver.mesh.bounds.mean(axis=0).reshape(1, 3)  # a point at the mesh center → should be inside
+            print("contains center:", solver.mesh.contains(test_pt))   # expect [True]
+            print("is_watertight:", solver.mesh.is_watertight)
+            print("is_winding_consistent:", solver.mesh.is_winding_consistent)
+            for ci, i in enumerate(range(0, n_test, posterior_batch)):
+                chunk = test_points[i:i + posterior_batch]
+                if tolerance:
+                    means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True, blank_near=True, near_tol=near_tol).reshape(-1, 3)
+                else:
+                    means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
+                if (ci % 50 == 0 or ci == n_chunks - 1):
+                    print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
+            with open(prior_file, "wb") as f:
+                pickle.dump(means_tests, f)
+            print(f"saved grid prior to {prior_file}", flush=True)
 
         
         means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
@@ -354,13 +391,15 @@ def run_gpr(
             batch=posterior_batch, progress_every=posterior_batch*10)
         GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
-        bar.text(f"Variance posterior over grid ({n_chunks} chunks)...")
-        # Variance is streamed per chunk straight from the Cholesky factors; no
-        # full-grid K_test or beta is ever formed (that was the OOM).
-        GPR_variances = posterior_vars_batched(
-            test_points, training_coords, ell, var, c, low,
-            batch=posterior_batch, progress_every=posterior_batch*10)
-        GPR_variances = np.array(GPR_variances).reshape(-1, 3)
+        bar.text("Variance posterior (skipped)...")
+        compute_variance = False   # flip to True when you want uncertainty maps
+        if compute_variance:
+            GPR_variances = posterior_vars_batched(
+                test_points, training_coords, ell, var, c, low,
+                batch=posterior_batch, progress_every=posterior_batch*10)
+            GPR_variances = np.array(GPR_variances).reshape(-1, 3)
+        else:
+            GPR_variances = np.full((test_points.shape[0], 3), np.nan)
 
         # Training reconstruction check
         K_signal = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=0.0, jitter=0.0)

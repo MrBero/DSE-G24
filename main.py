@@ -5,8 +5,8 @@ import numpy as np
 
 def main():
     result = run_gpr(
-        stl_filepath="input_stls/Aerospecial_building4.stl",
-        cfd_filepath="inputs/csv_with_everything.pkl",
+        stl_filepath="input_stls/triangle.stl",
+        cfd_filepath="inputs/FLTG.csv",
         stl_scale=1.0 / 1000.0,
         # stl_rotate=-np.pi/2,
         res=30,
@@ -14,7 +14,7 @@ def main():
         bounds_input=np.array([[-100,100],[30,275],[0,50]]),
         n_restarts=6,
         fit_pressure=True,
-        posterior_batch=100,
+        # posterior_batch=100,
         #random
         # sample_method='random',
         # num_samples=120
@@ -28,7 +28,7 @@ def main():
 
     )
 
-    plot_all(result, z_slice_target=25, show=True)
+    plot_all(result, z_slice_target=2.5, show=True)
 
 
 if __name__ == "__main__":
