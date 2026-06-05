@@ -393,7 +393,8 @@ def run_gpr(
             batch=posterior_batch, progress_every=posterior_batch*10)
         GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
-        bar.text("Variance posterior")
+        bar.text("Variance posterior (skipped)...")
+        compute_variance = True   # flip to True when you want uncertainty maps
         if compute_variance:
             GPR_variances = posterior_vars_batched(
                 test_points, training_coords, ell, var, c, low,
