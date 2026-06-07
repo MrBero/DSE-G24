@@ -223,14 +223,7 @@ def ts():
 
 def _structured_shell_points(cylinder_geom, r_lo_frac, r_hi_frac,
                              n_theta=120, n_z=40, n_r=5):
-    """Build a structured set of points filling a thick tilted-cylinder shell.
-
-    The cylinder is the oblique one from sampling._oblique_cylinder_points:
-    horizontal circular rings whose centers lean downstream with height. The
-    shell spans radius [r_lo_frac, r_hi_frac] * R. Returns (N,3) coordinates on a
-    regular (theta, z, radius) lattice - grid-INDEPENDENT, so the RMSE region is
-    identical across phases regardless of res.
-    """
+    """Build a structured set of points filling a thick tilted-cylinder shell."""
     bc = np.asarray(cylinder_geom["bottom_center"], float)
     tc = np.asarray(cylinder_geom["top_center"], float)
     Rc = float(cylinder_geom["R"])
@@ -256,13 +249,7 @@ def _structured_shell_points(cylinder_geom, r_lo_frac, r_hi_frac,
 
 
 def _region_rmse(points, sample_dat_shi, post_interp, prior_interp=None):
-    """Evaluate CFD truth (via sample_dat_shi) and GPR posterior (via interpolator)
-    at arbitrary points, return (prior_rmse, post_rmse, n_valid).
 
-    Reuses the EXISTING functions: sample_dat_shi for the CFD ground truth, and a
-    trilinear interpolator over the already-computed posterior grid. No new GP
-    solves, no panel-solver calls.
-    """
     if len(points) == 0:
         return None, None, 0
     cfd = sample_dat_shi(points)
@@ -285,6 +272,22 @@ def _region_rmse(points, sample_dat_shi, post_interp, prior_interp=None):
 # =============================================================================
 # Momentum-integral force (separate pass - never touches the grid arrays)
 # =============================================================================
+import multiprocessing as mp
+
+
+def _bpa_force_worker(region_points, midpoint, mom_vel, mom_p, bpa_L, q):
+    """Runs in a CHILD process. pyvista/VTK and open3d are imported ONLY here,
+    so their process-global state never touches the parent (where alive_bar
+    lives). The child dies after returning, taking all VTK state with it."""
+    try:
+        import numpy as _np
+        from momentum.momentum_open import surface_force_bpa
+        FORCE, _mesh, _pcd = surface_force_bpa(
+            region_points, midpoint, mom_vel, mom_p, L=bpa_L)
+        q.put(("ok", _np.asarray(FORCE, float)))
+    except Exception as e:
+        q.put(("err", repr(e)))
+
 
 def compute_momentum_force(cylinder_geom, solver, v_inf,
                            training_coords, ell, var, alpha, means_tests_dummy,
@@ -296,18 +299,19 @@ def compute_momentum_force(cylinder_geom, solver, v_inf,
 
     This is a SELF-CONTAINED pass: it generates the momentum surface points, gets
     their prior (panel solver, cached), GP velocity posterior, and pressure
-    posterior, then calls surface_force_bpa. It never appends to or reads the
+    posterior, then computes the surface force. It never appends to or reads the
     res^3 grid, so plots and grid RMSE are unaffected.
 
-    The surface is fixed by the cylinder geometry (same every phase), so the prior
-    on it is cached separately from the grid prior and reused across phases. Only
-    the GP posterior changes per phase (training points accumulate) - exactly the
-    force-vs-#drones sweep we want.
+    The surface-force step (pyvista/VTK + open3d BPA) runs in a SPAWNED child
+    process. VTK keeps process-lifetime global singletons that leak into the
+    parent's terminal/stdout state and break the alive_bar on subsequent runs;
+    isolating it in a child that exits cleanly is the only reliable teardown.
+    Because of this, "mesh" and "pcd" are returned as None (they live in the
+    now-dead child); nothing downstream consumes them when show_plot is False.
 
     Returns dict: {"force", "mesh", "pcd", "points", "velocity", "pressure", "n"}.
     """
     from momentum.sampler_momentum import sample_cylinder_uniform
-    from momentum.momentum_open import surface_force_bpa
 
     R = float(cylinder_geom["R"])
     p1 = np.asarray(cylinder_geom["bottom_center"], float)
@@ -355,16 +359,31 @@ def compute_momentum_force(cylinder_geom, solver, v_inf,
     mom_p = predict_batched(p_gpr, region_points, batch=posterior_batch) \
         if p_gpr is not None else np.zeros(n_mom)
 
-    # --- surface force via momentum balance ---
+    # --- surface force via momentum balance, in a SPAWNED child process ---
+    # Everything passed across the boundary is plain numpy (picklable); the
+    # un-picklable solver / p_gpr are NOT passed. spawn (not fork) guarantees a
+    # fresh interpreter with no inherited VTK state.
     if midpoint is None:
         midpoint = 0.5 * (p1 + p2)
-    FORCE, mesh, pcd = surface_force_bpa(
-        region_points, midpoint, mom_vel, mom_p, L=bpa_L)
+    midpoint = np.asarray(midpoint, float)
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    proc = ctx.Process(
+        target=_bpa_force_worker,
+        args=(region_points, midpoint, mom_vel, mom_p, bpa_L, q))
+    proc.start()
+    status, payload = q.get()      # blocks until child returns a result
+    proc.join()
+    if status != "ok":
+        raise RuntimeError(f"BPA force worker failed: {payload}")
+    FORCE = payload
 
     if show_plot:
-        _show_momentum_plot(mesh, pcd)
+        print("show_plot is not supported with subprocess force calc "
+              "(mesh lives in the dead child); skipping.", flush=True)
 
-    return {"force": np.asarray(FORCE, float), "mesh": mesh, "pcd": pcd,
+    return {"force": np.asarray(FORCE, float), "mesh": None, "pcd": None,
             "points": region_points, "velocity": mom_vel, "pressure": mom_p,
             "n": n_mom}
 
@@ -440,7 +459,7 @@ def run_gpr(
             f"batch={posterior_batch}, n_restarts={n_restarts}, "
             f"fit_pressure={fit_pressure}\n", flush=True)
 
-    with alive_bar(8, dual_line=True, enrich_print=False) as bar:
+    with alive_bar(9, dual_line=True, enrich_print=False) as bar:
         bar.text('Loading...')
         # --- Mesh ---
         stl_mesh = trimesh.load_mesh(stl_filepath)
@@ -490,9 +509,8 @@ def run_gpr(
         n_test = test_points.shape[0]
         n_chunks = (n_test + posterior_batch - 1) // posterior_batch
 
-        # Cache the Julia prior on the grid. Valid as long as geometry + CFD
-        # bounds are unchanged; res and v_inf are encoded in the filename so
-        # changing either picks a different cache automatically.
+        # Cache the Julia prior on the grid. 
+        # Delete prior_cache if CFD/Geometry/Tolerances change.
         os.makedirs("prior_cache", exist_ok=True)
         prior_file = os.path.join(
             "prior_cache",
@@ -511,15 +529,13 @@ def run_gpr(
         else:
             tolerance = True
             if tolerance:
-                near_tol = 0.03 * solver.diag
+                near_tol = 0.04 * solver.diag
                 print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
             means_tests = np.empty((n_test, 3), dtype=float)
-
-            # after solver is built, before the prior loop:
-            test_pt = solver.mesh.bounds.mean(axis=0).reshape(1, 3)  # a point at the mesh center → should be inside
-            print("contains center:", solver.mesh.contains(test_pt))   # expect [True]
-            print("is_watertight:", solver.mesh.is_watertight)
-            print("is_winding_consistent:", solver.mesh.is_winding_consistent)
+            print("contains center:", solver.mesh.contains(solver.mesh.bounds.mean(axis=0).reshape(1, 3)),
+                  " is_watertight:", solver.mesh.is_watertight,
+                  "is_winding_consistent:", solver.mesh.is_winding_consistent)
+            
             for ci, i in enumerate(range(0, n_test, posterior_batch)):
                 chunk = test_points[i:i + posterior_batch]
                 if tolerance:
@@ -632,18 +648,13 @@ def run_gpr(
         n_bad_pred = int((~np.all(np.isfinite(GPR_posterior), axis=1)).sum())
         if n_bad_pred:
             print(f"WARNING: {n_bad_pred} non-finite posterior points excluded "
-                  f"from RMSE (check var/noise bounds).", flush=True)
+                  f"from RMSE (check var/noise bounds).", flush=True) #flags building inside
         truth = cfd_test_vels[valid_cfd]
         prior_test_rmse = rmse(means_tests[valid_cfd], truth)
         post_test_rmse = rmse(GPR_posterior[valid_cfd], truth)
         truth_test_rms = float(np.sqrt(np.mean(truth ** 2)))
 
-        # --- in-cylinder RMSE regions, evaluated on STRUCTURED points (not grid
-        #     cells), so the region is identical across phases regardless of res:
-        #       thick shell : (1-f)R .. (1+f)R   (force-integration volume)
-        #       on-face band: |rho - R| <= face_halfwidth*R  (exactly on the cylinder)
-        #     CFD truth comes from sample_dat_shi; the GPR posterior is trilinearly
-        #     interpolated from the grid posterior we already computed. ---
+        # --- in-cylinder RMSE regions
         prior_shell_rmse = post_shell_rmse = None
         prior_face_rmse = post_face_rmse = None
         shell_n = face_n = 0
@@ -701,6 +712,7 @@ def run_gpr(
             pressure_test_rmse = rmse(pressure_posterior[valid_p], cfd_p[valid_p])
         bar()
 
+        bar.text('Force Calculation...')
         # --- Momentum-integral surface force (SEPARATE pass, never touches grid) ---
         momentum_result = None
         force_vec = None
@@ -725,6 +737,7 @@ def run_gpr(
             except Exception as e:
                 print(f"WARNING: momentum force failed ({e}); continuing without it.",
                       flush=True)
+        bar()
 
         metrics = {
             "training_point_n": training_point_n,

@@ -47,10 +47,10 @@ ADAPTIVE_CFG = dict(
     w_var=0.2, w_grad=0.4, w_vort=0.4,   # favor gradient + vorticity
     # weighted-LHS candidate pool over the thick tilted cylinder shell
     pool_size=4000, resample_size=600, score_beta=2.0,
-    shell_thick_in=0.40, shell_thick_out=0.40,   # shell spans 0.7R .. 1.3R
+    shell_thick_in=0.20, shell_thick_out=0.20,   # shell spans 0.7R .. 1.3R
     front_frac=0.5, front_half_angle_deg=60.0,   # bias toward the wake side
     # per-phase budget (mostly on-cylinder)
-    n_new=80, frac_region1=0.60, frac_region2=0.2, frac_region3=0.2,
+    n_new=80, frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
     # spacing: hard drone limit + optional spread relaxation
     excl_horizontal=1.2, excl_vertical=4.2,
     spread_radius=None,   # set e.g. 6.0 to relax points ~6 m apart laterally

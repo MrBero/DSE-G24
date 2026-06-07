@@ -2,6 +2,8 @@
 __pycache__
 input_stls
 inputs
+plots
+prior_cache
 .venv
 *csv_with_everything*
 .env
