@@ -218,10 +218,6 @@ def _shell_lhs_pool(fr, cfg, n, seed):
     r_lo = (1.0 - cfg["shell_thick_in"]) * R
     r_hi = (1.0 + cfg["shell_thick_out"]) * R
 
-    half = np.radians(cfg["front_half_angle_deg"])
-    n_front = int(round(cfg["front_frac"] * n))
-    n_back = n - n_front
-
     # orientation: phi measured from downstream s_hat, swept toward cross-wind.
     s2 = fr["s_hat"]
     if s2 is None:
@@ -241,6 +237,13 @@ def _shell_lhs_pool(fr, cfg, n, seed):
         xy = rc + offset
         return np.column_stack([xy[:, 0], xy[:, 1], z])
 
+    # front_frac=None -> UNIFORM sweep over the full ring (no front/back bias).
+    if cfg.get("front_frac") is None:
+        return chunk(n, 0.0, 2 * np.pi, seed)
+
+    half = np.radians(cfg["front_half_angle_deg"])
+    n_front = int(round(cfg["front_frac"] * n))
+    n_back = n - n_front
     front = chunk(n_front, -half, half, seed)
     back = chunk(n_back, half, 2 * np.pi - half, seed + 1)
     return np.vstack([front, back])
@@ -365,6 +368,12 @@ def propose_adaptive_points(result, previous_coords=None, adaptive_config=None,
         raise RuntimeError("LHS candidate pool empty after mesh rejection.")
 
     pool_score = score_fn(pool)
+    # Points near/inside the building can interpolate a non-finite posterior
+    # (the panel prior blanks the interior -> NaN). Treat non-finite difficulty
+    # as zero weight so the importance-resample probabilities stay finite; the
+    # point can still be chosen to fill a band, just not preferentially. Without
+    # this a single NaN score makes p = w/w.sum() all-NaN and rng.choice raises.
+    pool_score = np.nan_to_num(pool_score, nan=0.0, posinf=0.0, neginf=0.0)
     weights = np.clip(pool_score, 0, None) ** cfg["score_beta"]
 
     # importance-resample to a manageable survivor set, then split by radial band

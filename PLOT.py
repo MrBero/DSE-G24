@@ -312,8 +312,6 @@ def save_all(result, out_dir="plots", phase_label="phase0",
         return f"{v:.4g}" if isinstance(v, (int, float)) and v is not None else "n/a"
 
     dom = m.get("post_test_rmse"); dom_rel = m.get("rel_post_test_rmse")
-    shl = m.get("post_shell_rmse"); shl_rel = m.get("rel_post_shell_rmse")
-    fac = m.get("post_face_rmse"); fac_rel = m.get("rel_post_face_rmse")
     pres = m.get("pressure_test_rmse")
     fmag = m.get("force_mag"); fvec = m.get("force_vec")
 
@@ -324,9 +322,7 @@ def save_all(result, out_dir="plots", phase_label="phase0",
 
     header = f"{phase_label}  |  {n_train} training pts"
     rmse_lines = [
-        f"velocity RMSE   1) whole domain: {_fmt(dom)} (rel {_fmt(dom_rel)})   "
-        f"2) thick cylinder: {_fmt(shl)} (rel {_fmt(shl_rel)})   "
-        f"3) on cylinder: {_fmt(fac)} (rel {_fmt(fac_rel)})",
+        f"velocity RMSE (whole domain): {_fmt(dom)} (rel {_fmt(dom_rel)})",
         f"pressure RMSE: {_fmt(pres)}    momentum force |F|: {_fmt(fmag)}",
     ]
     annot = header + "\n" + "\n".join(rmse_lines)
@@ -343,9 +339,7 @@ def save_all(result, out_dir="plots", phase_label="phase0",
     lines = [
         header, "",
         "Velocity RMSE (absolute  |  relative to truth-RMS):", "",
-        f"  1. whole domain    : {_fmt(dom)}    (rel {_fmt(dom_rel)})    [{m.get('valid_cfd','?')} cells]",
-        f"  2. thick cylinder  : {_fmt(shl)}    (rel {_fmt(shl_rel)})    [{m.get('shell_n','?')} pts]",
-        f"  3. on the cylinder : {_fmt(fac)}    (rel {_fmt(fac_rel)})    [{m.get('face_n','?')} pts]",
+        f"  whole domain       : {_fmt(dom)}    (rel {_fmt(dom_rel)})    [{m.get('valid_cfd','?')} cells]",
         "", f"  Pressure RMSE      : {_fmt(pres)}",
         "", "Momentum-integral force:",
         f"  |F|                : {_fmt(fmag)}    [{m.get('momentum_n','?')} surface pts]",
@@ -362,8 +356,6 @@ def save_all(result, out_dir="plots", phase_label="phase0",
     lines += [
         "", "", "Prior (potential-flow baseline) for reference:",
         f"  whole domain prior : {_fmt(m.get('prior_test_rmse'))}",
-        f"  thick cyl prior    : {_fmt(m.get('prior_shell_rmse'))}",
-        f"  on cylinder prior  : {_fmt(m.get('prior_face_rmse'))}",
     ]
     ax.text(0.05, 0.95, "\n".join(lines), ha="left", va="top",
             fontsize=13, color="white", family="monospace",

@@ -11,21 +11,19 @@ COMMON = dict(
     stl_scale=1.0 / 1000.0,
     res=50,
     v_inf=(0.0, 13.6, 0.0),
-    bounds_input=np.array([[-100, 100], [30, 275], [0, 50]]),
+    bounds_input=np.array([[-100, 100], [30, 275], [0, 80]]),
     n_restarts=6,
     fit_pressure=True,
     posterior_batch=100,
     compute_variance=True,
-    var_res=50,          # variance computed on a 50^3 grid, interpolated up to res^3 (velocity stays full res)
-    rmse_shell_frac=0.3, # in-cylinder RMSE shell: (1-f)R .. (1+f)R around the tilted rings
-    rmse_face_halfwidth=0.05,  # on-face RMSE band: |rho - R| <= this*R
+    var_res=50,         # variance computed on a 50^3 grid, interpolated up to res^3 (velocity stays full res)
 )
 
 # initial sampling: tilted cylinder (gives us cylinder_geom for the adaptive regions)
 INITIAL_SAMPLING = dict(
     sample_method="cylinder",
     sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
-                   "n_points": 80, "front_frac": 0.25, "front_half_angle_deg": 45},
+                   "n_points": 80, "front_frac": 0.25, "front_half_angle_deg": 45.0},
 )
 
 # how many adaptive phases to run (0 -> behaves exactly like the old single run)
@@ -47,14 +45,39 @@ ADAPTIVE_CFG = dict(
     w_var=0.2, w_grad=0.4, w_vort=0.4,   # favor gradient + vorticity
     # weighted-LHS candidate pool over the thick tilted cylinder shell
     pool_size=4000, resample_size=600, score_beta=2.0,
-    shell_thick_in=0.20, shell_thick_out=0.20,   # shell spans 0.7R .. 1.3R
+    shell_thick_in=0.30, shell_thick_out=0.30,   # shell spans 0.7R .. 1.3R
     front_frac=0.5, front_half_angle_deg=60.0,   # bias toward the wake side
     # per-phase budget (mostly on-cylinder)
     n_new=80, frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
     # spacing: hard drone limit + optional spread relaxation
-    excl_horizontal=1.2, excl_vertical=4.2,
+    excl_horizontal=4.2, excl_vertical=4.2,
     spread_radius=None,   # set e.g. 6.0 to relax points ~6 m apart laterally
 )
+
+# Optional PER-PHASE overrides of ADAPTIVE_CFG. Map phase number (1-based, the
+# adaptive phases) -> dict of keys to override for that phase only. Anything not
+# listed falls back to ADAPTIVE_CFG. Leave empty to use ADAPTIVE_CFG everywhere.
+# Example:
+#   ADAPTIVE_CFG_PER_PHASE = {
+#       1: dict(front_frac=None, shell_thick_in=0.30, shell_thick_out=0.15),
+#       2: dict(w_vort=0.6, w_grad=0.3, w_var=0.1),
+#       3: dict(frac_region1=0.5, frac_region2=0.25, frac_region3=0.25),
+#   }
+#Doesnt really help...
+ADAPTIVE_CFG_PER_PHASE = {
+    # 1: dict(w_grad=0.35, w_vort=0.35, w_var=0.3),
+    # 2: dict(w_grad=0.4, w_vort=0.4, w_var=0.2),
+    # 3: dict(w_grad=0.5, w_vort=0.5, w_var=0.0),
+    # 4: dict(w_grad=0.34, w_vort=0.33, w_var=0.33),
+    # 5: dict(w_grad=0.4, w_vort=0.4, w_var=0.2),
+}
+
+
+def _phase_cfg(phase):
+    """Merge ADAPTIVE_CFG with any per-phase overrides for this phase."""
+    cfg = dict(ADAPTIVE_CFG)
+    cfg.update(ADAPTIVE_CFG_PER_PHASE.get(phase, {}))
+    return cfg
 
 
 def _print_rmse(phase, result):
@@ -65,15 +88,9 @@ def _print_rmse(phase, result):
         return f"{v:.4g}" if v is not None else "n/a"
     dom = m.get("post_test_rmse")
     dom_rel = m.get("rel_post_test_rmse")
-    shell = m.get("post_shell_rmse"); shell_rel = m.get("rel_post_shell_rmse")
-    face = m.get("post_face_rmse"); face_rel = m.get("rel_post_face_rmse")
     print(f"\n[RMSE] phase {phase}  (training pts: {m.get('training_point_n')})")
     print(f"    1. whole domain   : {fmt(dom)}   (rel {fmt(dom_rel)})   "
           f"[{m.get('valid_cfd')} cells]")
-    print(f"    2. thick cylinder : {fmt(shell)}   (rel {fmt(shell_rel)})   "
-          f"[{m.get('shell_n')} cells]")
-    print(f"    3. on the cylinder: {fmt(face)}   (rel {fmt(face_rel)})   "
-          f"[{m.get('face_n')} cells]")
     print(f"    pressure          : {fmt(m.get('pressure_test_rmse'))}")
     fmag = m.get("force_mag"); fvec = m.get("force_vec")
     if fmag is not None and fvec is not None:
@@ -122,6 +139,18 @@ def main():
     results = [result]
     force_curve = [(len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec"))]
 
+    def _free_heavy(res):
+        """Drop the big arrays + the CFD sampler closure from an old phase result.
+        Each run_gpr rebuilds the 21M-point CFD interpolator; if old results keep
+        their sample_dat_shi closure alive, those interpolators never get freed and
+        memory grows every phase until a fresh build runs out (the phase-3 crash).
+        We only ever use results[-1] downstream, so freeing the rest is safe."""
+        if res is None:
+            return
+        for k in ("sample_dat_shi", "test_points", "GPR_posterior", "GPR_variances",
+                  "means_tests", "cfd_test_vels", "pressure_posterior", "momentum"):
+            res.pop(k, None)
+
     # ---------- adaptive phases ----------
     for phase in range(1, N_PHASES + 1):
         print(f"\n=== PHASE {phase} (adaptive) ===")
@@ -130,7 +159,7 @@ def main():
         new_pts = propose_adaptive_points(
             results[-1],
             previous_coords=accumulated,     # clear of ALL prior points
-            adaptive_config=ADAPTIVE_CFG,
+            adaptive_config=_phase_cfg(phase),
         )
         if len(new_pts) == 0:
             print("[main] no new points proposed - stopping early.")
@@ -138,6 +167,10 @@ def main():
 
         accumulated = np.vstack([accumulated, new_pts])
         print(f"[main] accumulated training points: {len(accumulated)}")
+
+        # free the previous phase's heavy data (CFD sampler, grid arrays) so the
+        # next run_gpr's fresh 21M-point interpolator has room.
+        _free_heavy(results[-1])
 
         # re-run keeping every previous point, just with the augmented set
         result = run_gpr(

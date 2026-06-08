@@ -221,72 +221,10 @@ def ts():
     return time.perf_counter()
 
 
-def _structured_shell_points(cylinder_geom, r_lo_frac, r_hi_frac,
-                             n_theta=120, n_z=40, n_r=5):
-    """Build a structured set of points filling a thick tilted-cylinder shell."""
-    bc = np.asarray(cylinder_geom["bottom_center"], float)
-    tc = np.asarray(cylinder_geom["top_center"], float)
-    Rc = float(cylinder_geom["R"])
-    z_b, z_t = bc[2], tc[2]
-    z_mid = 0.5 * (z_b + z_t)
-    dz_full = max(z_t - z_b, 1e-12)
-    shift_per_dz = (tc[:2] - bc[:2]) / dz_full
-    P0 = bc[:2] - shift_per_dz * (z_b - z_mid)
-
-    thetas = np.linspace(0, 2 * np.pi, n_theta, endpoint=False)
-    zs = np.linspace(z_b, z_t, n_z)
-    if n_r > 1:
-        radii = np.linspace(r_lo_frac * Rc, r_hi_frac * Rc, n_r)
-    else:
-        radii = np.array([0.5 * (r_lo_frac + r_hi_frac) * Rc])
-
-    TT, ZZ, RR = np.meshgrid(thetas, zs, radii, indexing="ij")
-    TT, ZZ, RR = TT.ravel(), ZZ.ravel(), RR.ravel()
-    rc = P0[None, :] + (ZZ - z_mid)[:, None] * shift_per_dz[None, :]
-    x = rc[:, 0] + RR * np.cos(TT)
-    y = rc[:, 1] + RR * np.sin(TT)
-    return np.column_stack([x, y, ZZ])
-
-
-def _region_rmse(points, sample_dat_shi, post_interp, prior_interp=None):
-
-    if len(points) == 0:
-        return None, None, 0
-    cfd = sample_dat_shi(points)
-    cfd_vel = np.asarray(cfd)[:, :3]
-    post = np.asarray(post_interp(points))
-    valid = (~np.any(np.isnan(cfd_vel), axis=1)) & np.all(np.isfinite(post), axis=1)
-    n = int(valid.sum())
-    if n == 0:
-        return None, None, 0
-    post_rmse = rmse(post[valid], cfd_vel[valid])
-    prior_rmse = None
-    if prior_interp is not None:
-        pri = np.asarray(prior_interp(points))
-        vp = valid & np.all(np.isfinite(pri), axis=1)
-        if vp.any():
-            prior_rmse = rmse(pri[vp], cfd_vel[vp])
-    return prior_rmse, post_rmse, n
-
-
 # =============================================================================
 # Momentum-integral force (separate pass - never touches the grid arrays)
 # =============================================================================
 import multiprocessing as mp
-
-
-def _bpa_force_worker(region_points, midpoint, mom_vel, mom_p, bpa_L, q):
-    """Runs in a CHILD process. pyvista/VTK and open3d are imported ONLY here,
-    so their process-global state never touches the parent (where alive_bar
-    lives). The child dies after returning, taking all VTK state with it."""
-    try:
-        import numpy as _np
-        from momentum.momentum_open import surface_force_bpa
-        FORCE, _mesh, _pcd = surface_force_bpa(
-            region_points, midpoint, mom_vel, mom_p, L=bpa_L)
-        q.put(("ok", _np.asarray(FORCE, float)))
-    except Exception as e:
-        q.put(("err", repr(e)))
 
 
 def compute_momentum_force(cylinder_geom, solver, v_inf,
@@ -369,8 +307,9 @@ def compute_momentum_force(cylinder_geom, solver, v_inf,
 
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
+    from momentum_worker import bpa_force_worker
     proc = ctx.Process(
-        target=_bpa_force_worker,
+        target=bpa_force_worker,
         args=(region_points, midpoint, mom_vel, mom_p, bpa_L, q))
     proc.start()
     status, payload = q.get()      # blocks until child returns a result
@@ -438,12 +377,7 @@ def run_gpr(
     num_samples=150,
     compute_variance=True,
     var_res=None,
-    rmse_shell_frac=0.3,
-    rmse_face_halfwidth=0.05,
     cylinder_geom_override=None,
-    rmse_n_theta=120,
-    rmse_n_z=40,
-    rmse_n_r=5,
     compute_force=True,
     momentum_n_points=25000,
     momentum_include_top=True,
@@ -459,7 +393,7 @@ def run_gpr(
             f"batch={posterior_batch}, n_restarts={n_restarts}, "
             f"fit_pressure={fit_pressure}\n", flush=True)
 
-    with alive_bar(9, dual_line=True, enrich_print=False) as bar:
+    with alive_bar(8, dual_line=True, enrich_print=False) as bar:
         bar.text('Loading...')
         # --- Mesh ---
         stl_mesh = trimesh.load_mesh(stl_filepath)
@@ -654,42 +588,6 @@ def run_gpr(
         post_test_rmse = rmse(GPR_posterior[valid_cfd], truth)
         truth_test_rms = float(np.sqrt(np.mean(truth ** 2)))
 
-        # --- in-cylinder RMSE regions
-        prior_shell_rmse = post_shell_rmse = None
-        prior_face_rmse = post_face_rmse = None
-        shell_n = face_n = 0
-        geom_for_rmse = cylinder_geom if cylinder_geom is not None else cylinder_geom_override
-        if geom_for_rmse is not None:
-            from scipy.interpolate import RegularGridInterpolator
-            gx_ = np.linspace(bounds[0, 0], bounds[0, 1], res)
-            gy_ = np.linspace(bounds[1, 0], bounds[1, 1], res)
-            gz_ = np.linspace(bounds[2, 0], bounds[2, 1], res)
-            post_grid = GPR_posterior.reshape(res, res, res, 3)
-            prior_grid = means_tests.reshape(res, res, res, 3)
-            post_interp = RegularGridInterpolator((gx_, gy_, gz_), post_grid,
-                                                  bounds_error=False, fill_value=np.nan)
-            prior_interp = RegularGridInterpolator((gx_, gy_, gz_), prior_grid,
-                                                   bounds_error=False, fill_value=np.nan)
-
-            f = rmse_shell_frac
-            fw = rmse_face_halfwidth
-            shell_pts = _structured_shell_points(
-                geom_for_rmse, 1 - f, 1 + f,
-                n_theta=rmse_n_theta, n_z=rmse_n_z, n_r=rmse_n_r)
-            face_pts = _structured_shell_points(
-                geom_for_rmse, 1 - fw, 1 + fw,
-                n_theta=rmse_n_theta, n_z=rmse_n_z, n_r=max(rmse_n_r // 2, 2))
-
-            prior_shell_rmse, post_shell_rmse, shell_n = _region_rmse(
-                shell_pts, sample_dat_shi, post_interp, prior_interp)
-            prior_face_rmse, post_face_rmse, face_n = _region_rmse(
-                face_pts, sample_dat_shi, post_interp, prior_interp)
-
-            print(f"RMSE regions (structured): thick shell {shell_n}/{len(shell_pts)} pts "
-                  f"(rho in [{(1-f):.2g},{(1+f):.2g}]*R), "
-                  f"on-face {face_n}/{len(face_pts)} pts (|rho-R|<={fw:.2g}*R)", flush=True)
-        bar()
-
         bar.text('Pressure GPR...')
         # --- Pressure GPR (scalar, sklearn) ---
         pressure_posterior = None
@@ -751,16 +649,6 @@ def run_gpr(
             "valid_cfd": int(valid_cfd.sum()),
             "n_test": int(len(valid_cfd)),
             "pressure_test_rmse": pressure_test_rmse,
-            "prior_shell_rmse": prior_shell_rmse,
-            "post_shell_rmse": post_shell_rmse,
-            "shell_n": shell_n,
-            "rel_post_shell_rmse": (post_shell_rmse / max(truth_test_rms, 1e-12)
-                                    if post_shell_rmse is not None else None),
-            "prior_face_rmse": prior_face_rmse,
-            "post_face_rmse": post_face_rmse,
-            "face_n": face_n,
-            "rel_post_face_rmse": (post_face_rmse / max(truth_test_rms, 1e-12)
-                                   if post_face_rmse is not None else None),
             "force_vec": (force_vec.tolist() if force_vec is not None else None),
             "force_mag": force_mag,
             "momentum_n": (momentum_result["n"] if momentum_result is not None else 0),
@@ -768,7 +656,7 @@ def run_gpr(
         bar.text('Done!')
     
 
-    return {
+    _result = {
         "test_points": test_points,
         "bounds": bounds,
         "res": res,
@@ -792,6 +680,18 @@ def run_gpr(
         "sample_dat_shi": sample_dat_shi,   # live CFD sampler closure
         "stl_mesh": stl_mesh,               # for mesh-reject of proposed points
     }
+
+    # Shut down THIS run's Julia panel server now, rather than waiting for the
+    # atexit hook. Each run_gpr starts a fresh FLOWPanelSolver -> a fresh Julia
+    # process; if they're only closed at program exit they accumulate across
+    # phases/configs and exhaust memory. mesh_vertices is already a numpy copy,
+    # so nothing in the returned dict needs the live solver.
+    try:
+        solver.close()
+    except Exception:
+        pass
+
+    return _result
 
 
 if __name__ == "__main__":
