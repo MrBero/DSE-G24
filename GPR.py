@@ -249,21 +249,23 @@ def compute_momentum_force(cylinder_geom, solver, v_inf,
 
     Returns dict: {"force", "mesh", "pcd", "points", "velocity", "pressure", "n"}.
     """
-    from momentum.sampler_momentum import sample_cylinder_uniform
+    from bektir_experimentatation.epstein3 import make_oblique_cylinder_mesh, surface_force as epstein_surface_force
 
     R = float(cylinder_geom["R"])
     p1 = np.asarray(cylinder_geom["bottom_center"], float)
     p2 = np.asarray(cylinder_geom["top_center"], float)
 
-    # --- momentum surface points (fixed by geometry) ---
-    region_points = sample_cylinder_uniform(
-        p1=p1, p2=p2, R=R, n=n_points, top=include_top, bottom=include_bottom)
-    region_points = np.asarray(region_points, float)
+    # --- momentum surface mesh (triangulated mesh via Epstein3) ---
+    mesh = make_oblique_cylinder_mesh(
+        center_bot=p1, center_top=p2, radius=R,
+        total_points=n_points, cap_bottom=include_bottom, cap_top=include_top
+    )
+    region_points = np.asarray(mesh.points, float)
     n_mom = region_points.shape[0]
 
     # --- prior on the surface (panel solver), cached by geometry ---
     os.makedirs(prior_cache_dir, exist_ok=True)
-    geo_key = (f"R{R:g}_b{p1[0]:g}_{p1[1]:g}_{p1[2]:g}"
+    geo_key = (f"epstein3_R{R:g}_b{p1[0]:g}_{p1[1]:g}_{p1[2]:g}"
                f"_t{p2[0]:g}_{p2[1]:g}_{p2[2]:g}_n{n_mom}"
                f"_top{int(include_top)}_bot{int(include_bottom)}"
                f"_vinf{v_inf[0]:g}_{v_inf[1]:g}_{v_inf[2]:g}")
@@ -297,32 +299,17 @@ def compute_momentum_force(cylinder_geom, solver, v_inf,
     mom_p = predict_batched(p_gpr, region_points, batch=posterior_batch) \
         if p_gpr is not None else np.zeros(n_mom)
 
-    # --- surface force via momentum balance, in a SPAWNED child process ---
-    # Everything passed across the boundary is plain numpy (picklable); the
-    # un-picklable solver / p_gpr are NOT passed. spawn (not fork) guarantees a
-    # fresh interpreter with no inherited VTK state.
-    if midpoint is None:
-        midpoint = 0.5 * (p1 + p2)
-    midpoint = np.asarray(midpoint, float)
-
-    ctx = mp.get_context("spawn")
-    q = ctx.Queue()
-    from momentum_worker import bpa_force_worker
-    proc = ctx.Process(
-        target=bpa_force_worker,
-        args=(region_points, midpoint, mom_vel, mom_p, bpa_L, q))
-    proc.start()
-    status, payload = q.get()      # blocks until child returns a result
-    proc.join()
-    if status != "ok":
-        raise RuntimeError(f"BPA force worker failed: {payload}")
-    FORCE = payload
+    # --- surface force via momentum balance using Epstein3 quadratic integration ---
+    mesh.point_data["velocity"] = mom_vel
+    mesh.point_data["pressure"] = mom_p
+    
+    # epstein3 logic uses analytical integration on the triangulated mesh
+    FORCE, result_mesh = epstein_surface_force(mesh, rho=1.225)
 
     if show_plot:
-        print("show_plot is not supported with subprocess force calc "
-              "(mesh lives in the dead child); skipping.", flush=True)
+        _show_momentum_plot(result_mesh, None)
 
-    return {"force": np.asarray(FORCE, float), "mesh": None, "pcd": None,
+    return {"force": np.asarray(FORCE, float), "mesh": result_mesh, "pcd": None,
             "points": region_points, "velocity": mom_vel, "pressure": mom_p,
             "n": n_mom}
 
