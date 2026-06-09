@@ -420,23 +420,27 @@ def propose_adaptive_points(result, previous_coords=None, adaptive_config=None,
 
 
 def propose_top_cap_points(result, previous_coords=None, n_new=20,
-                           cap_z_offset=0.0, n_rings=3, adaptive_config=None,
-                           verbose=True):
+                           cap_z_offset=0.0, n_rings=None, adaptive_config=None,
+                           cap_oversample=40, verbose=True):
     """Place a small number of drones on the cylinder TOP CAP.
 
     Motivated by momentum escaping through the open top of the control volume:
     these points sit on the horizontal disk at (or just above) z_top, out to
-    radius R, so the GP has data where the top-surface flux is integrated. Points
-    are spread on concentric rings and de-clustered against previous_coords with
-    the same drone-exclusion ellipsoid as the side sampler.
+    radius R, so the GP has data where the top-surface flux is integrated.
+    Candidates are drawn by area-uniform Latin-hypercube over the disk (r = R*sqrt(u)
+    so points don't pile up at the center, theta via LHS for low-discrepancy
+    spread), then de-clustered against previous_coords with the same drone-
+    exclusion ellipsoid as the side sampler.
 
-    n_new       : target number of cap drones (keep small).
-    cap_z_offset: place the cap at z_top + this (0 = exactly on the top ring plane).
-    n_rings     : number of concentric rings to distribute points over.
+    n_new        : target number of cap drones (keep small).
+    cap_z_offset : place the cap at z_top + this (0 = exactly on the top ring plane).
+    cap_oversample: candidates generated = cap_oversample * n_new before de-clustering.
+    n_rings      : ignored (kept for backward-compat with old ring-based calls).
     """
     cfg = dict(ADAPTIVE_DEFAULTS)
     if adaptive_config:
         cfg.update(adaptive_config)
+    rng = np.random.default_rng(cfg["seed"])
 
     if previous_coords is None:
         previous_coords = np.asarray(result["training_coords"], float)
@@ -453,20 +457,17 @@ def propose_top_cap_points(result, previous_coords=None, n_new=20,
         scale = max(cfg["spread_radius"] / max(rh, 1e-9), 1.0)
         rh *= scale; rv *= scale
 
-    # candidate cloud: concentric rings on the cap disk (oversampled)
-    cands = []
-    weights = []
-    ring_radii = np.linspace(0.15 * R, R, n_rings)
-    for ri, rad in enumerate(ring_radii):
-        n_on_ring = max(8, int(round(2 * np.pi * rad / max(rh, 1e-6))))
-        phis = np.linspace(0, 2 * np.pi, n_on_ring, endpoint=False)
-        for phi in phis:
-            x = cap_center_xy[0] + rad * np.cos(phi)
-            y = cap_center_xy[1] + rad * np.sin(phi)
-            cands.append([x, y, z_cap])
-            weights.append(1.0 + ri)     # mild bias to outer rings (where flux is)
-    cands = np.asarray(cands, float)
-    weights = np.asarray(weights, float)
+    # candidate cloud: area-uniform LHS over the cap disk (oversampled).
+    # r = R*sqrt(u0) -> uniform density per unit area (raw u0 over-samples center);
+    # theta from a second LHS column -> low-discrepancy azimuth, no ring banding.
+    n_cand = max(int(cap_oversample * n_new), 64)
+    u = qmc.LatinHypercube(d=2, seed=cfg["seed"]).random(n_cand)
+    rad = R * np.sqrt(u[:, 0])
+    phi = 2.0 * np.pi * u[:, 1]
+    x = cap_center_xy[0] + rad * np.cos(phi)
+    y = cap_center_xy[1] + rad * np.sin(phi)
+    cands = np.column_stack([x, y, np.full(n_cand, z_cap)])
+    weights = 1.0 + rad / R          # mild continuous bias to outer disk (where flux is)
 
     # mesh-reject then de-cluster with greedy farthest-point selection
     keep = _mesh_reject_mask(cands, result["stl_mesh"], epsilon=cfg["epsilon"],

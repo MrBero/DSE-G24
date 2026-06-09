@@ -224,8 +224,20 @@ def ts():
 # =============================================================================
 # Momentum-integral force (separate pass - never touches the grid arrays)
 # =============================================================================
-import multiprocessing as mp
 
+def _show_momentum_plot(mesh, pcd):
+    """Optional pyvista view of the momentum surface (his original visualization)."""
+    try:
+        import pyvista
+    except Exception:
+        print("pyvista not available - skipping momentum plot", flush=True)
+        return
+    plotter = pyvista.Plotter()
+    plotter.add_mesh(mesh, scalars="pressure")
+    arrows = mesh.glyph(orient="Normals", scale=False, factor=5)
+    plotter.add_mesh(arrows, color="red")
+    plotter.show()
+    plotter.close()
 
 def compute_momentum_force(cylinder_geom, solver, v_inf,
                            training_coords, ell, var, alpha, means_tests_dummy,
@@ -312,22 +324,6 @@ def compute_momentum_force(cylinder_geom, solver, v_inf,
     return {"force": np.asarray(FORCE, float), "mesh": result_mesh, "pcd": None,
             "points": region_points, "velocity": mom_vel, "pressure": mom_p,
             "n": n_mom}
-
-
-def _show_momentum_plot(mesh, pcd):
-    """Optional pyvista view of the momentum surface (his original visualization)."""
-    try:
-        import pyvista
-    except Exception:
-        print("pyvista not available - skipping momentum plot", flush=True)
-        return
-    plotter = pyvista.Plotter()
-    plotter.add_mesh(mesh, scalars="pressure")
-    arrows = mesh.glyph(orient="Normals", scale=False, factor=5)
-    plotter.add_mesh(arrows, color="red")
-    plotter.show()
-    plotter.close()
-
 
 # =============================================================================
 # Sampling defaults per method

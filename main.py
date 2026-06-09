@@ -22,17 +22,17 @@ COMMON = dict(
 # initial sampling: tilted cylinder (gives us cylinder_geom for the adaptive regions)
 INITIAL_SAMPLING = dict(
     sample_method="cylinder",
-    sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
-                   "n_points": 80, "front_frac": 0.25, "front_half_angle_deg": 45.0},
+    sample_config={"r_factor": 1.5, "h_factor": 1.5, "tilt_deg": 10,
+                   "n_points": 80, "front_frac": 0.5, "front_half_angle_deg": 45.0},
 )
 
 # how many adaptive phases to run (0 -> behaves exactly like the old single run)
-N_PHASES = 3
+N_PHASES = 6
 
 # optional FINAL top-cap phase: places a few drones on the cylinder top cap,
 # where momentum may escape the open control volume. On by default.
 TOP_CAP_PHASE = False
-TOP_CAP_N = 10            # number of cap drones
+TOP_CAP_N = 30            # number of cap drones
 TOP_CAP_Z_OFFSET = 0.0   # place cap at z_top (of the CYLINDER) + this
 
 # Known true force [Fx, Fy, Fz] in N, for convergence comparison each phase.
@@ -45,10 +45,10 @@ ADAPTIVE_CFG = dict(
     w_var=0.2, w_grad=0.4, w_vort=0.4,   # favor gradient + vorticity
     # weighted-LHS candidate pool over the thick tilted cylinder shell
     pool_size=4000, resample_size=600, score_beta=2.0,
-    shell_thick_in=0.30, shell_thick_out=0.30,   # shell spans 0.7R .. 1.3R
+    shell_thick_in=0.50, shell_thick_out=0.30,   # shell spans 0.7R .. 1.3R
     front_frac=0.5, front_half_angle_deg=60.0,   # bias toward the wake side
     # per-phase budget (mostly on-cylinder)
-    n_new=80, frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
+    n_new=80, frac_region1=0.6, frac_region2=0.25, frac_region3=0.15, # 1 - face, 2 - in, 3 - out
     # spacing: hard drone limit + optional spread relaxation
     excl_horizontal=4.2, excl_vertical=4.2,
     spread_radius=None,   # set e.g. 6.0 to relax points ~6 m apart laterally

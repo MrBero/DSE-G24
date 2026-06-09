@@ -29,7 +29,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from GPR import run_gpr
-from adaptive import propose_adaptive_points
+from adaptive import propose_adaptive_points, propose_top_cap_points
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ COMMON = dict(
     stl_filepath="input_stls/Aerospecial_building4.stl",
     cfd_filepath="inputs/csv_with_everything.pkl",
     stl_scale=1.0 / 1000.0,
-    res=50,
+    res=30,
     v_inf=(0.0, 13.6, 0.0),
     bounds_input=np.array([[-100, 100], [30, 275], [0, 80]]),
     n_restarts=6,
@@ -51,31 +51,39 @@ COMMON = dict(
 
 TRUE_FORCE = np.array([155433.0, 208647.0, 72586.0])
 
-N_PHASES = 4            # up to 5 adaptive phases to watch for convergence
+N_PHASES = 5            # up to 5 adaptive phases to watch for convergence
 DRONES_PER_PHASE = 80   # phase 0 and every adaptive phase add this many
-
-# Base adaptive config (matches main.py defaults). Each named config below is
-# this dict with a few keys overridden, so differences are attributable.
-BASE_ADAPTIVE = dict(
-    w_var=0.2, w_grad=0.4, w_vort=0.4,
-    pool_size=4000, resample_size=600, score_beta=2.0,
-    shell_thick_in=0.20, shell_thick_out=0.20,
-    front_frac=0.5, front_half_angle_deg=60.0,
-    n_new=DRONES_PER_PHASE,
-    frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
-    excl_horizontal=4.2, excl_vertical=4.2,
-    spread_radius=None,
-)
 
 # Initial cylinder sampling. r_factor/h_factor live here (sample_config), so
 # studying them means varying INITIAL_SAMPLING per config (see CONFIGS).
 BASE_INITIAL = dict(
     sample_method="cylinder",
     sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
-                   "n_points": DRONES_PER_PHASE,
-                   "front_frac": 0.5, "front_half_angle_deg": 60.0},
+                   "n_points": DRONES_PER_PHASE, "front_frac": 0.25, "front_half_angle_deg": 45.0},
 )
 
+# Base adaptive config (matches main.py defaults). Each named config below is
+# this dict with a few keys overridden, so differences are attributable.
+BASE_ADAPTIVE = dict(
+    # difficulty score (computed on the existing res^3 grid via np.gradient)
+    w_var=0.2, w_grad=0.4, w_vort=0.4,   # favor gradient + vorticity
+    # weighted-LHS candidate pool over the thick tilted cylinder shell
+    pool_size=4000, resample_size=600, score_beta=2.0,
+    shell_thick_in=0.30, shell_thick_out=0.30,   # shell spans 0.7R .. 1.3R
+    front_frac=0.5, front_half_angle_deg=60.0,   # bias toward the wake side
+    # per-phase budget (mostly on-cylinder)
+    n_new=DRONES_PER_PHASE, frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
+    # spacing: hard drone limit + optional spread relaxation
+    excl_horizontal=4.2, excl_vertical=4.2,
+    spread_radius=None,   # set e.g. 6.0 to relax points ~6 m apart laterally
+)
+
+# Optional FINAL top-cap phase per config. Off by default since this study is
+# Fx/Fy-focused and the cap mainly affects Fz (the open-top flux), but useful
+# if you want to see the cap's effect on a curve. Appended as one extra point.
+TOP_CAP_PHASE = False
+TOP_CAP_N = 30            # number of cap drones
+TOP_CAP_Z_OFFSET = 0.0    # place cap at cylinder z_top + this
 
 def _cfg(**overrides):
     c = dict(BASE_ADAPTIVE); c.update(overrides); return c
@@ -93,7 +101,7 @@ def _init(**sample_overrides):
 # Edit freely - add/remove rows. Keep the list short; each row is ~4-5 min.
 # ---------------------------------------------------------------------------
 CONFIGS = [
-    ("baseline",            _init(),                    _cfg()),
+    # ("baseline",            _init(),                    _cfg()),
     # ("r_factor_1.1",        _init(r_factor=1.0),        _cfg()),
     # ("r_factor_1.5",        _init(r_factor=1.4),        _cfg()),
     # ("r_factor_2.0",        _init(r_factor=1.6),        _cfg()),
@@ -107,19 +115,34 @@ CONFIGS = [
     # ("front_frac=0.8",      _init(),                    _cfg(front_frac=0.8)),    
     # ("spread_6m",           _init(),                    _cfg(spread_radius=6.0)),
 
-    # ("balanced",              _init(),                    _cfg(w_var=0.33, w_grad=0.34, w_vort=0.33)),
-    # ("more w_var",            _init(),                    _cfg(w_var=0.6, w_grad=0.2, w_vort=0.2)),
-    # ("more w_grad",           _init(),                    _cfg(w_var=0.2, w_grad=0.6, w_vort=0.2)),
-    # ("more w_vort",           _init(),                    _cfg(w_var=0.2, w_grad=0.2, w_vort=0.6)),
-    # ("less w_var",            _init(),                    _cfg(w_var=0.2, w_grad=0.4, w_vort=0.4)),      
-    # ("less w_grad",           _init(),                    _cfg(w_var=0.4, w_grad=0.2, w_vort=0.4)),
-    # ("less w_vort",           _init(),                    _cfg(w_var=0.4, w_grad=0.4, w_vort=0.2)),
+    # ("balanced",             _init(),                    _cfg(w_var=0.33, w_grad=0.34, w_vort=0.33)),
+    # ("more w_var",           _init(),                    _cfg(w_var=0.6, w_grad=0.2, w_vort=0.2)),
+    # ("more w_grad",          _init(),                    _cfg(w_var=0.2, w_grad=0.6, w_vort=0.2)),
+    # ("more w_vort",          _init(),                    _cfg(w_var=0.2, w_grad=0.2, w_vort=0.6)),
+    # ("less w_var",           _init(),                    _cfg(w_var=0.2, w_grad=0.4, w_vort=0.4)),      
+    # ("less w_grad",          _init(),                    _cfg(w_var=0.4, w_grad=0.2, w_vort=0.4)),
+    # ("less w_vort",          _init(),                    _cfg(w_var=0.4, w_grad=0.4, w_vort=0.2)),
 
-    ("bigger shell",        _init(),                    _cfg(shell_thick_in=0.4, shell_thick_out=0.4)),
-    ("big shell",           _init(),                    _cfg(shell_thick_in=0.3, shell_thick_out=0.3)),    
-    ("small shell",         _init(),                    _cfg(shell_thick_in=0.15, shell_thick_out=0.15)),
-    ("smaller shell",       _init(),                    _cfg(shell_thick_in=0.075, shell_thick_out=0.075))     
+    # ("bigger shell",        _init(),                    _cfg(shell_thick_in=0.4, shell_thick_out=0.4)),
+    # ("big shell",           _init(),                    _cfg(shell_thick_in=0.3, shell_thick_out=0.3)),    
+    # ("small shell",         _init(),                    _cfg(shell_thick_in=0.15, shell_thick_out=0.15)),
+    # ("smaller shell",       _init(),                    _cfg(shell_thick_in=0.075, shell_thick_out=0.075))     
 
+    # ("1 drones per step",  _init(n_points=1),         _cfg(n_new=1)),
+    # ("5 drones per step",  _init(n_points=5),         _cfg(n_new=5)),    
+    # ("10 drones per step",  _init(n_points=10),         _cfg(n_new=10)),
+    # ("20 drones per step",  _init(n_points=20),         _cfg(n_new=20)),
+    # ("30 drones per step",  _init(n_points=30),         _cfg(n_new=30)),
+
+    # ("40 drones per step",  _init(n_points=40),         _cfg(n_new=40)),
+    # ("50 drones per step",  _init(n_points=50),         _cfg(n_new=50)),     
+    ("60 drones per step",  _init(n_points=60),         _cfg(n_new=60)),
+    ("70 drones per step",  _init(n_points=70),         _cfg(n_new=70)),
+    ("80 drones per step",  _init(n_points=80),         _cfg(n_new=80)),
+    ("90 drones per step",  _init(n_points=90),         _cfg(n_new=90)),
+    ("100 drones per step", _init(n_points=100),        _cfg(n_new=100)),
+    ("150 drones per step", _init(n_points=150),        _cfg(n_new=150)),
+    ("200 drones per step", _init(n_points=200),        _cfg(n_new=200))
 ]
 
 
@@ -170,7 +193,27 @@ def run_one(name, initial_sampling, adaptive_cfg):
             ey = abs(fv[1] - TRUE_FORCE[1]) / abs(TRUE_FORCE[1])
             print(f"[{name}] phase {phase}  {len(accumulated)} drones  "
                   f"relx={ex:.4g}  rely={ey:.4g}")
-                  
+            
+    if TOP_CAP_PHASE:
+        result["cylinder_geom"] = cyl
+        cap_pts = propose_top_cap_points(
+            result, previous_coords=accumulated,
+            n_new=TOP_CAP_N, cap_z_offset=TOP_CAP_Z_OFFSET,
+            adaptive_config=adaptive_cfg, verbose=False)
+        if len(cap_pts):
+            accumulated = np.vstack([accumulated, cap_pts])
+            _free_heavy(result)
+            gc.collect()
+            result = run_gpr(**COMMON, sample_method="array",
+                             samples=accumulated, cylinder_geom_override=cyl)
+            curve.append((len(accumulated), result["metrics"].get("force_vec")))
+            fv = result["metrics"].get("force_vec")
+            if fv is not None:
+                ex = abs(fv[0] - TRUE_FORCE[0]) / abs(TRUE_FORCE[0])
+                ey = abs(fv[1] - TRUE_FORCE[1]) / abs(TRUE_FORCE[1])
+                print(f"[{name}] top-cap  {len(accumulated)} drones  "
+                      f"relx={ex:.4g}  rely={ey:.4g}")   
+                           
     # free the final phase too before moving to the next config
     _free_heavy(result)
     gc.collect()
