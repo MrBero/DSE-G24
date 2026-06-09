@@ -196,10 +196,29 @@ def make_oblique_cylinder_mesh(
 # CFD helpers (unchanged from original)
 # ---------------------------------------------------------------------------
 
-def attach_cfd_fields(mesh: pv.PolyData, sampler) -> pv.PolyData:
+def attach_cfd_fields(
+	mesh: pv.PolyData,
+	sampler,
+	max_inflow_angle_deg: float | None = None,
+	velocity_noise_std: float = 0.0,
+	pressure_noise_std: float = 0.0,
+) -> pv.PolyData:
 	out = sampler(mesh.points)
-	mesh["velocity"] = out[:, :3]
-	mesh["pressure"] = out[:, 3]
+	velocity = out[:, :3]
+	pressure = out[:, 3]
+
+	if max_inflow_angle_deg is not None:
+		max_vz = np.tan(np.deg2rad(max_inflow_angle_deg)) * np.linalg.norm(velocity[:, :2], axis=1)
+		velocity[:, 2] = np.clip(velocity[:, 2], -max_vz, max_vz)
+
+	if velocity_noise_std > 0.0:
+		velocity += np.random.normal(0.0, velocity_noise_std, velocity.shape)
+
+	if pressure_noise_std > 0.0:
+		pressure += np.random.normal(0.0, pressure_noise_std, pressure.shape)
+
+	mesh["velocity"] = velocity
+	mesh["pressure"] = pressure
 	return mesh
 
 
@@ -259,7 +278,7 @@ if __name__ == "__main__":
 	Radius   = 52.6
 	r_factor = 1.2
 
-	R  = 60
+	R  = Radius * r_factor
 	H  = 70.0
 	N_POINTS  = 4
 	SHARPNESS = 2
@@ -283,7 +302,7 @@ if __name__ == "__main__":
 
 	df      = pd.read_pickle(PKL_PATH)
 	sampler = interpolation.build_cfd_sampler(
-		df, n_points=N_POINTS, sharpness=SHARPNESS, cache_path=CACHE_PATH
+		df, n_points=N_POINTS, sharpness=SHARPNESS, #cache_path=CACHE_PATH
 	)
 	print(time.time() - t, "sampler done")
 
@@ -296,11 +315,11 @@ if __name__ == "__main__":
 		center_bot   = np.array([CX, CY, 0.0]),
 		center_top   = np.array([CX, CY, H]),
 		radius       = R,
-		total_points = 300,
+		total_points = 250_000,
 		cap_top      = True,
 		cap_bottom   = False,
 	)
-	attach_cfd_fields(surface, sampler)
+	attach_cfd_fields(surface, sampler, max_inflow_angle_deg=15, velocity_noise_std=.1, pressure_noise_std=6)
 
 	# Unpack the tuple returned by surface_force
 	F_total, result_mesh = surface_force(surface, rho=1.225)
@@ -317,67 +336,67 @@ if __name__ == "__main__":
 	
 	pl.add_axes()
 	pl.show()
+	if False:
+		#---- convergence study: POINT COUNT --------------------------------
+		r_factors = np.linspace(0.5, 2, 10)
+		fy_r = []
 
-	#---- convergence study: POINT COUNT --------------------------------
-	r_factors = np.linspace(0.5, 2, 10)
-	fy_r = []
+		for rf in r_factors:
+			R_rf = Radius * rf
+			m = make_oblique_cylinder_mesh(
+				center_bot   = np.array([CX, CY, 0.0]),
+				center_top   = np.array([CX, CY, H]),
+				radius       = R_rf,
+				total_points = 1_000_000,
+				cap_top      = True,
+				cap_bottom   = False,
+			)
 
-	for rf in r_factors:
-		R_rf = Radius * rf
-		m = make_oblique_cylinder_mesh(
-			center_bot   = np.array([CX, CY, 0.0]),
-			center_top   = np.array([CX, CY, H]),
-			radius       = R_rf,
-			total_points = 1_000_000,
-			cap_top      = True,
-			cap_bottom   = False,
-		)
+			attach_cfd_fields(m, sampler)
+			F_n, _ = surface_force(m, rho=1.225)
+			fy_r.append(F_n[1])
+			print(f"r_factor={rf:.3f} R={R_rf:.2f} Fy={F_n[1]:>12.1f}")
 
-		attach_cfd_fields(m, sampler)
-		F_n, _ = surface_force(m, rho=1.225)
-		fy_r.append(F_n[1])
-		print(f"r_factor={rf:.3f} R={R_rf:.2f} Fy={F_n[1]:>12.1f}")
+		#Plotting block unindented
+		plt.figure()
+		plt.axhline(F_REF_Y, color="red", linestyle="--", label=f"Reference Fy = {F_REF_Y:,.0f} N")
+		plt.plot(r_factors, fy_r, marker="o")
+		plt.xlabel("r_factor")
+		plt.ylabel("Fy [N]")
+		plt.title("Convergence study - Fy vs r_factor")
+		plt.legend()
+		plt.tight_layout()
+		plt.show()
 
-	#Plotting block unindented
-	plt.figure()
-	plt.axhline(F_REF_Y, color="red", linestyle="--", label=f"Reference Fy = {F_REF_Y:,.0f} N")
-	plt.plot(r_factors, fy_r, marker="o")
-	plt.xlabel("r_factor")
-	plt.ylabel("Fy [N]")
-	plt.title("Convergence study - Fy vs r_factor")
-	plt.legend()
-	plt.tight_layout()
-	plt.show()
+		# ---- convergence study: HEIGHT ---------------------------------------
+		heights = np.linspace(60, 90, 31)
+		print(heights)
+		fy_h = []
+		import gc
+		for h in heights:
+			m = make_oblique_cylinder_mesh(
+				center_bot   = np.array([CX, CY, 0.0]),
+				center_top   = np.array([CX, CY, h]),
+				radius       = R,
+				total_points = 25_000,
+				cap_top      = True,
+				cap_bottom   = False,
+			)
 
-	# ---- convergence study: HEIGHT ---------------------------------------
-	heights = np.linspace(60, 90, 31)
-	print(heights)
-	fy_h = []
-	import gc
-	for h in heights:
-		m = make_oblique_cylinder_mesh(
-			center_bot   = np.array([CX, CY, 0.0]),
-			center_top   = np.array([CX, CY, h]),
-			radius       = R,
-			total_points = 25_000,
-			cap_top      = True,
-			cap_bottom   = False,
-		)
+			attach_cfd_fields(m, sampler)
+			F_n, _ = surface_force(m, rho=1.225)
+			fy_h.append(F_n[1])
+			print(f"height={h:.2f} Fy={F_n[1]:>12.1f}")
+			del m
+			del _
+			gc.collect()
 
-		attach_cfd_fields(m, sampler)
-		F_n, _ = surface_force(m, rho=1.225)
-		fy_h.append(F_n[1])
-		print(f"height={h:.2f} Fy={F_n[1]:>12.1f}")
-		del m
-		del _
-		gc.collect()
-
-	plt.figure()
-	plt.axhline(F_REF_Y, color="red", linestyle="--", label=f"Reference Fy = {F_REF_Y:,.0f} N")
-	plt.plot(heights, fy_h, marker="o")
-	plt.xlabel("Height [m]")
-	plt.ylabel("Fy [N]")
-	plt.title("Convergence study - Fy vs Height")
-	plt.legend()
-	plt.tight_layout()
-	plt.show()
+		plt.figure()
+		plt.axhline(F_REF_Y, color="red", linestyle="--", label=f"Reference Fy = {F_REF_Y:,.0f} N")
+		plt.plot(heights, fy_h, marker="o")
+		plt.xlabel("Height [m]")
+		plt.ylabel("Fy [N]")
+		plt.title("Convergence study - Fy vs Height")
+		plt.legend()
+		plt.tight_layout()
+		plt.show()
