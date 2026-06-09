@@ -257,12 +257,12 @@ def surface_force(
 
 if __name__ == "__main__":
 	Radius   = 52.6
-	r_factor = 0.8
+	r_factor = 1.2
 
 	R  = 60
 	H  = 70.0
-	N_POINTS  = 1
-	SHARPNESS = 4
+	N_POINTS  = 4
+	SHARPNESS = 2
 
 	MIDPOINT = np.array([
 		6524.591 / 1000,
@@ -318,7 +318,7 @@ if __name__ == "__main__":
 	pl.add_axes()
 	pl.show()
 
-	# ---- convergence study: POINT COUNT --------------------------------
+	#---- convergence study: POINT COUNT --------------------------------
 	r_factors = np.linspace(0.5, 2, 10)
 	fy_r = []
 
@@ -338,7 +338,7 @@ if __name__ == "__main__":
 		fy_r.append(F_n[1])
 		print(f"r_factor={rf:.3f} R={R_rf:.2f} Fy={F_n[1]:>12.1f}")
 
-	# Plotting block unindented
+	#Plotting block unindented
 	plt.figure()
 	plt.axhline(F_REF_Y, color="red", linestyle="--", label=f"Reference Fy = {F_REF_Y:,.0f} N")
 	plt.plot(r_factors, fy_r, marker="o")
@@ -351,14 +351,15 @@ if __name__ == "__main__":
 
 	# ---- convergence study: HEIGHT ---------------------------------------
 	heights = np.linspace(60, 90, 31)
+	print(heights)
 	fy_h = []
-
+	import gc
 	for h in heights:
 		m = make_oblique_cylinder_mesh(
 			center_bot   = np.array([CX, CY, 0.0]),
 			center_top   = np.array([CX, CY, h]),
 			radius       = R,
-			total_points = 250_000,
+			total_points = 25_000,
 			cap_top      = True,
 			cap_bottom   = False,
 		)
@@ -367,6 +368,9 @@ if __name__ == "__main__":
 		F_n, _ = surface_force(m, rho=1.225)
 		fy_h.append(F_n[1])
 		print(f"height={h:.2f} Fy={F_n[1]:>12.1f}")
+		del m
+		del _
+		gc.collect()
 
 	plt.figure()
 	plt.axhline(F_REF_Y, color="red", linestyle="--", label=f"Reference Fy = {F_REF_Y:,.0f} N")
