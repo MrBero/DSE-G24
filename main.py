@@ -2,15 +2,15 @@
 main.py
 -------
 Wind-field force pipeline. Wires together:
-    cylinder_geom     -- sampling geometry
-    cfd_sampler       -- IDW (Inverse Distance Weighting) interpolation of CFD data
-    flowpanelwrapper  -- Julia FLOWPanel potential-flow prior
-    divergence_free_gpr -- divergence-free vector GPR (Gaussian Process Regression) for velocity
-    momentum          -- surface-force integration
+	cylinder_geom     -- sampling geometry
+	cfd_sampler       -- IDW (Inverse Distance Weighting) interpolation of CFD data
+	flowpanelwrapper  -- Julia FLOWPanel potential-flow prior
+	divergence_free_gpr -- divergence-free vector GPR (Gaussian Process Regression) for velocity
+	momentum          -- surface-force integration
 
 Inputs (hard-coded paths, edit below if needed):
-    inputs/csv_with_everything.pkl      -- CFD data
-    input_stls/Aerospecial_building4.stl -- building geometry STL
+	inputs/csv_with_everything.pkl      -- CFD data
+	input_stls/Aerospecial_building4.stl -- building geometry STL
 """
 
 import hashlib
@@ -33,6 +33,7 @@ from cfd_sampler import build_cfd_sampler
 from flowpanelwrapper import FLOWPanelSolver
 from divergence_free_gpr import DivergenceFreeGPR
 from momentum import surface_force
+from visualize_pipeline import visualize  
 
 # =============================================================================
 # Configuration
@@ -49,12 +50,13 @@ STL_SCALE       = 1.0 / 1000.0                  # STL is in mm, convert to m
 # Cylinder geometry multipliers (passed to calculate_wake_cylinder_parameters)
 R_FACTOR        = 3    # cylinder radius = R_FACTOR * building footprint circumradius
 H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
-TILT_DEG        = 0   # downstream wake tilt in degrees
+TILT_DEG        = 20   # downstream wake tilt in degrees
 
 # Sampling
 N_DRONES_SIDE  = 200    # points used to train the GPR
-N_DRONES_TOP = 200
+N_DRONES_TOP = 50
 N_MOM_POINTS    = 100_000 # points on the momentum integration surface
+drone_depth = 5
 
 # GPR settings
 N_RESTARTS      = 8      # L-BFGS-B (Limited-memory Broyden-Fletcher-Goldfarb-Shanno Bounded) restarts for velocity hyperparameter optimisation
@@ -110,7 +112,7 @@ def run():
 	print("Starting Julia panel server...")
 	t0 = time.perf_counter()
 	solver = FLOWPanelSolver(stl_mesh, V_INF, julia_script="FP.jl",
-	                         julia_bin="julia", verbose=True)
+							 julia_bin="julia", verbose=True)
 	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# ------------------------------------------------------------------
@@ -131,14 +133,34 @@ def run():
 	# ------------------------------------------------------------------
 	print("Generating sampling coordinates...")
 	t0 = time.perf_counter()
-	drone_pts = generate_cylindrical_sampling_coordinates(
+	if drone_depth > 0:
+		drone_pts_inner = generate_cylindrical_sampling_coordinates(
+		center_bot, center_top, radius - drone_depth,
+		z_clearance=.1,
+		side_points=N_DRONES_SIDE // 2,
+		top_points=N_DRONES_TOP,
+		bot_points=0
+		)
+		drone_pts_outer = generate_cylindrical_sampling_coordinates(
+			center_bot, center_top, radius + drone_depth,
+			z_clearance=.1,
+			side_points=N_DRONES_SIDE // 2,
+			top_points=0,
+			bot_points=0
+		)
+		drone_pts = np.vstack([drone_pts_inner, drone_pts_outer])
+	else:
+		drone_pts = generate_cylindrical_sampling_coordinates(
 		center_bot, center_top, radius,
 		z_clearance=.1,
 		side_points=N_DRONES_SIDE,
 		top_points=N_DRONES_TOP,
 		bot_points=0
 	)
-	visualize_points(drone_pts, point_size=5)
+
+
+
+	#	visualize_points(drone_pts, point_size=5)
 	print(f"  total points  : {drone_pts.shape[0]}")
 
 	print(f"  drone points  : {drone_pts.shape[0]}")
@@ -196,7 +218,7 @@ def run():
 	).fit(drone_pts, vel_residuals)
 
 	print(f"  ell={vel_gpr.ell_}  var={vel_gpr.var_:.4g}  "
-	      f"noise={vel_gpr.noise_:.4g}  nll={vel_gpr.nll_:.6g}")
+		  f"noise={vel_gpr.noise_:.4g}  nll={vel_gpr.nll_:.6g}")
 	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# ------------------------------------------------------------------
@@ -275,8 +297,21 @@ def run():
 		"force_mag"    : F_mag,
 		"vel_gpr"      : vel_gpr,
 		"p_gpr"        : p_gpr,
+		"mom_mesh"     : mom_mesh,       # <-- Add this line
+		"stl_mesh"     : stl_mesh,       # <-- Add this line
+		"drone_pts"    : drone_pts,      # <-- Add this line
+		"drone_vels"   : training_vels,  # <-- Add this line
 	}
 
 
 if __name__ == "__main__":
 	result = run()
+
+	print("\nStarting rendering pipeline...")
+	visualize(
+		mom_mesh=result["mom_mesh"],
+		stl_mesh=result["stl_mesh"],
+		drone_pts=result["drone_pts"],
+		drone_vels=result["drone_vels"],
+		show=True
+	)
