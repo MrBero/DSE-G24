@@ -52,8 +52,8 @@ H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
 TILT_DEG        = 0   # downstream wake tilt in degrees
 
 # Sampling
-N_DRONES_SIDE  = 300    # points used to train the GPR
-N_DRONES_TOP = 100
+N_DRONES_SIDE  = 200    # points used to train the GPR
+N_DRONES_TOP = 200
 N_MOM_POINTS    = 100_000 # points on the momentum integration surface
 
 # GPR settings
@@ -250,8 +250,13 @@ def run():
 	mom_mesh["pressure"] = mom_pres
 
 	print("Computing surface force...")
+	building_centroid = np.array([ #this might go in the cylinder_geom.py but is also simple enough to be kept here
+		stl_mesh.centroid[0],
+		stl_mesh.centroid[1],
+		stl_mesh.centroid[2],
+	])
 	t0 = time.perf_counter()
-	F = surface_force(mom_mesh, rho=RHO)
+	F = surface_force(mom_mesh, rho=RHO, interior_point = building_centroid)
 	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	F_mag = float(np.linalg.norm(F))

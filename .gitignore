@@ -5,3 +5,4 @@ inputs
 .venv
 *csv_with_everything*
 .env
+*.npy
