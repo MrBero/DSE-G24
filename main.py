@@ -28,7 +28,7 @@ from cylinder_geom import (
 from cfd_sampler import build_cfd_sampler
 from flowpanelwrapper import FLOWPanelSolver
 from divergence_free_gpr import DivergenceFreeGPR
-from momentum import attach_cfd_fields, surface_force
+from momentum import surface_force
 
 # =============================================================================
 # Configuration
@@ -62,20 +62,6 @@ IDW_SHARPNESS   = 2.0
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def make_predictor(vel_gpr: DivergenceFreeGPR, p_gpr: GaussianProcessRegressor,
-                   panel_solver: FLOWPanelSolver):
-	"""
-	Return a callable (N,3) -> (N,4) that combines the velocity and pressure
-	posteriors, matching the signature expected by attach_cfd_fields.
-	"""
-	def predictor(pts: np.ndarray) -> np.ndarray:
-		pts = np.asarray(pts, dtype=float)
-		prior_vel  = panel_solver.velocity(pts, blank_interior=False)   # (N,3)
-		vel        = vel_gpr.predict(pts, prior_vel)                     # (N,3)
-		pressure   = p_gpr.predict(pts)                                  # (N,)
-		return np.column_stack([vel, pressure])                          # (N,4)
-	return predictor
 
 
 def predict_batched(estimator, pts: np.ndarray, batch: int = 4_000) -> np.ndarray:
@@ -198,13 +184,12 @@ def run():
 	print("Predicting pressure posterior at momentum mesh points...")
 	mom_pres = predict_batched(p_gpr, mom_pts, batch=POSTERIOR_BATCH)  # (N_mom,)
 
-	# Attach fields directly (bypass make_predictor since we already have
-	# the arrays -- avoids a redundant Julia call on the momentum mesh)
+	# Attach fields directly
 	mom_mesh["velocity"] = mom_vel
 	mom_mesh["pressure"] = mom_pres
 
 	print("Computing surface force...")
-	F, annotated_mesh = surface_force(mom_mesh, rho=RHO)
+	F = surface_force(mom_mesh, rho=RHO)
 
 	F_mag = float(np.linalg.norm(F))
 	print("\n=== Result ===")
@@ -219,7 +204,6 @@ def run():
 	return {
 		"force_vector" : F,
 		"force_mag"    : F_mag,
-		"mesh"         : annotated_mesh,
 		"vel_gpr"      : vel_gpr,
 		"p_gpr"        : p_gpr,
 	}

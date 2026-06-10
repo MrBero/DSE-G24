@@ -2,14 +2,28 @@ import pyvista as pv
 import numpy as np
 
 
-def attach_cfd_fields(mesh: pv.PolyData, predictor) -> pv.PolyData:
-	"""
-	attach the velocities and pressures to the momentum mesh (the GPR predictor or if testing the CFD sampler itself)
-	"""
-	out = predictor(mesh.points)
-	mesh["velocity"] = out[:, :3]
-	mesh["pressure"] = out[:, 3]
-	return mesh
+# def attach_cfd_fields(
+# 	mesh: pv.PolyData,
+# 	velocity: np.ndarray | None = None,
+# 	pressure: np.ndarray | None = None,
+# 	predictor=None,
+# ) -> pv.PolyData:
+# 	"""
+# 	Attach velocity and pressure to the mesh, either from pre-computed
+# 	arrays or by calling a predictor(pts) -> (N,4) callable.
+# 	"""
+# 	if predictor is not None:
+# 		out = predictor(mesh.points)
+# 		velocity = out[:, :3]
+# 		pressure = out[:, 3]
+
+# 	if velocity is None or pressure is None:
+# 		raise ValueError("Provide either (velocity, pressure) arrays or a predictor callable.")
+
+# 	mesh["velocity"] = velocity
+# 	mesh["pressure"] = pressure
+# 	return mesh
+
 
 def compute_forces(
 	mesh: pv.PolyData,
@@ -44,7 +58,7 @@ def compute_forces(
 
 	F = mesh.integrate_data().cell_data["total_force"][0]
 
-	return F, mesh
+	return F
 
 
 def surface_force(
@@ -70,7 +84,7 @@ def surface_force(
 	if "velocity" not in mesh.point_data or "pressure" not in mesh.point_data:
 		raise ValueError(
 			"Mesh must have 'velocity' and 'pressure' point arrays. "
-			"Call attach_cfd_fields(mesh, sampler) first."
+			"attach the cfd fields beforehand."
 		)
 
 	return compute_forces(mesh, rho)
