@@ -13,6 +13,8 @@ Inputs (hard-coded paths, edit below if needed):
     input_stls/Aerospecial_building4.stl -- building geometry STL
 """
 
+import hashlib
+import os
 import time
 import numpy as np
 import pandas as pd
@@ -49,8 +51,8 @@ H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
 TILT_DEG        = 23.0   # downstream wake tilt in degrees
 
 # Sampling
-N_DRONES_SIDE  = 280    # points used to train the GPR
-N_DRONES_TOP = 20
+N_DRONES_SIDE  = 270    # points used to train the GPR
+N_DRONES_TOP = 30
 N_MOM_POINTS    = 100_000 # points on the momentum integration surface
 
 # GPR settings
@@ -81,6 +83,12 @@ def _fmt(seconds: float) -> str:
 		return f"{seconds:.2f}s"
 	m, s = divmod(seconds, 60)
 	return f"{int(m)}m {s:.2f}s"
+
+
+def _prior_mom_cache_path(stl_path, v_inf, center_bot, center_top, radius, n_mom_points, cap_bottom, cap_top) -> str:
+	bits = (stl_path, tuple(v_inf), tuple(center_bot), tuple(center_top), round(radius, 6), n_mom_points, cap_bottom, cap_top)
+	h = hashlib.md5(str(bits).encode()).hexdigest()[:10]
+	return f"cache/prior_mom_{h}.npy"
 
 # =============================================================================
 # Main pipeline
@@ -212,7 +220,15 @@ def run():
 	print("Evaluating potential-flow prior at momentum mesh points...")
 	t0 = time.perf_counter()
 	mom_pts = np.asarray(mom_mesh.points, dtype=float)
-	prior_at_mom = solver.velocity(mom_pts, blank_interior=True)   # (N_mom, 3)
+	cache_path = _prior_mom_cache_path(STL_PATH, V_INF, center_bot, center_top, radius, N_MOM_POINTS, False, True)
+	if os.path.exists(cache_path):
+		print(f"  Loading cached prior: {cache_path}")
+		prior_at_mom = np.load(cache_path)
+	else:
+		prior_at_mom = solver.velocity(mom_pts, blank_interior=True)
+		os.makedirs("cache", exist_ok=True)
+		np.save(cache_path, prior_at_mom)
+		print(f"  Saved prior cache: {cache_path}")
 	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	print("Predicting velocity posterior at momentum mesh points...")
