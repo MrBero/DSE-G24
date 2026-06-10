@@ -57,6 +57,8 @@ def _oblique_cylinder_points(stl_mesh,
                              n_points=300,
                              front_frac=0.5,
                              front_half_angle_deg=45.0,
+                             top_cap=False,
+                             top_cap_frac=0.25,
                              seed=7):
 
     V = np.asarray(stl_mesh.vertices)
@@ -95,8 +97,11 @@ def _oblique_cylinder_points(stl_mesh,
     top_center = np.array([*ring_center_xy(z_top), z_top])
 
     half = np.radians(front_half_angle_deg)
-    n_front = int(round(front_frac * n_points))
-    n_back = n_points - n_front
+
+    n_cap = int(round(top_cap_frac * n_points)) if top_cap else 0
+    n_side = n_points - n_cap
+    n_front = int(round(front_frac * n_side))
+    n_back = n_side - n_front
 
     def shell_lhs(nn, phi_min, phi_max, sd):
         if nn <= 0:
@@ -110,10 +115,22 @@ def _oblique_cylinder_points(stl_mesh,
         xy = rc + offset
         return np.column_stack([xy[:, 0], xy[:, 1], z])
 
+    def cap_lhs(nn, sd):
+        if nn <= 0:
+            return np.empty((0, 3))
+        u = qmc.LatinHypercube(d=2, seed=sd).random(nn)
+        rho = R * np.sqrt(u[:, 0])
+        theta = 2.0 * np.pi * u[:, 1]
+        cxy = ring_center_xy(z_top)            # tilted disk center at cap height
+        xy = cxy[None, :] + (np.cos(theta)[:, None] * s[None, :2]
+                             + np.sin(theta)[:, None] * c[None, :2]) * rho[:, None]
+        return np.column_stack([xy[:, 0], xy[:, 1], np.full(nn, z_top)])
+
     # phi ~ 0 is the wake side; this wedge gets the dense sampling.
     front = shell_lhs(n_front, -half, half, seed)
     back = shell_lhs(n_back, half, 2.0 * np.pi - half, seed + 1)
-    points = np.vstack([front, back])
+    cap = cap_lhs(n_cap, seed + 2)
+    points = np.vstack([front, back, cap])
 
     return points, R, bottom_center, top_center
 

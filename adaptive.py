@@ -338,7 +338,17 @@ def propose_adaptive_points(result, previous_coords=None, adaptive_config=None,
     cfg = dict(ADAPTIVE_DEFAULTS)
     if adaptive_config:
         cfg.update(adaptive_config)
-    rng = np.random.default_rng(cfg["seed"])
+
+    # Per-phase seed for the candidate pool. The shell LHS pool is otherwise
+    # drawn from the SAME fixed seed every phase, so multi-phase runs all
+    # resample from one frozen lattice of positions -> the greedy selector keeps
+    # re-proposing coordinates already occupied by earlier phases, which then get
+    # rejected as self-collisions rather than placed. Letting the caller pass a
+    # distinct pool_seed per phase (e.g. cfg["seed"] + phase) gives each phase a
+    # fresh candidate cloud while staying fully reproducible. Falls back to
+    # cfg["seed"] so single-call / legacy use is unchanged.
+    pool_seed = cfg.get("pool_seed", cfg["seed"])
+    rng = np.random.default_rng(pool_seed)
 
     if previous_coords is None:
         previous_coords = np.asarray(result["training_coords"], float)
@@ -359,14 +369,15 @@ def propose_adaptive_points(result, previous_coords=None, adaptive_config=None,
     score_fn = _score_interp(result, cfg)
 
     # ---- PART 1b: weighted-LHS candidate pool over the thick shell ----
-    pool = _shell_lhs_pool(fr, cfg, cfg["pool_size"], cfg["seed"])
+    pool = _shell_lhs_pool(fr, cfg, cfg["pool_size"], pool_seed)
     # mesh-reject the pool up front
     keep = _mesh_reject_mask(pool, result["stl_mesh"], epsilon=cfg["epsilon"],
                              use_signed_distance=True)
     pool = pool[keep]
     if len(pool) == 0:
         raise RuntimeError("LHS candidate pool empty after mesh rejection.")
-
+    if verbose:
+        print(f"[adaptive] pool_seed={pool_seed}  pool[0]={pool[0].round(2)}")
     pool_score = score_fn(pool)
     # Points near/inside the building can interpolate a non-finite posterior
     # (the panel prior blanks the interior -> NaN). Treat non-finite difficulty

@@ -1,31 +1,6 @@
-"""
-sensitivity_study.py
-====================
-
-Standalone driver (imports run_gpr / adaptive, modifies nothing) that runs the
-adaptive pipeline under several NAMED configurations and compares how fast and
-how accurately each one converges the momentum force - focused on Fx/Fy only,
-since Fz is dominated by the open-control-volume error and isn't informative.
-
-Why named configs rather than a full grid sweep:
-  one phase ~ 30-60 s at res=50, and 5 phases ~ 4-5 min per config. A full grid
-  over even 3 params x 3 values would be 27 configs x 5 min ~ 2+ hours. A short
-  list of deliberately-chosen configs (baseline + one-param-varied variants)
-  gives interpretable "which knob helps" answers in ~30 min. Edit CONFIGS below
-  to add/remove. Each config runs phase 0 (80 drones) + N_PHASES adaptive
-  phases (80 each), exactly like main.py - phase 0 is NOT bumped to 160.
-
-Outputs:
-  - console table: per-config Fx/Fy error vs #drones each phase
-  - plots/sensitivity_fx_fy.pdf: Fx and Fy convergence curves, one line per config
-  - returns the results dict for further inspection
-"""
-
 import os
 import gc
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from GPR import run_gpr
@@ -39,7 +14,7 @@ COMMON = dict(
     stl_filepath="input_stls/Aerospecial_building4.stl",
     cfd_filepath="inputs/csv_with_everything.pkl",
     stl_scale=1.0 / 1000.0,
-    res=30,
+    res=50,
     v_inf=(0.0, 13.6, 0.0),
     bounds_input=np.array([[-100, 100], [30, 275], [0, 80]]),
     n_restarts=6,
@@ -53,6 +28,8 @@ TRUE_FORCE = np.array([155433.0, 208647.0, 72586.0])
 
 N_PHASES = 5            # up to 5 adaptive phases to watch for convergence
 DRONES_PER_PHASE = 80   # phase 0 and every adaptive phase add this many
+
+PLOT_DIR = "plots"      # output directory for the PNG figures (e.g. "plots_sens")
 
 # Initial cylinder sampling. r_factor/h_factor live here (sample_config), so
 # studying them means varying INITIAL_SAMPLING per config (see CONFIGS).
@@ -69,12 +46,12 @@ BASE_ADAPTIVE = dict(
     w_var=0.2, w_grad=0.4, w_vort=0.4,   # favor gradient + vorticity
     # weighted-LHS candidate pool over the thick tilted cylinder shell
     pool_size=4000, resample_size=600, score_beta=2.0,
-    shell_thick_in=0.30, shell_thick_out=0.30,   # shell spans 0.7R .. 1.3R
+    shell_thick_in=0.20, shell_thick_out=0.20,   # shell spans 0.7R .. 1.3R
     front_frac=0.5, front_half_angle_deg=60.0,   # bias toward the wake side
     # per-phase budget (mostly on-cylinder)
-    n_new=DRONES_PER_PHASE, frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
+    n_new=DRONES_PER_PHASE, frac_region1=0.50, frac_region2=0.35, frac_region3=0.15,
     # spacing: hard drone limit + optional spread relaxation
-    excl_horizontal=4.2, excl_vertical=4.2,
+    excl_horizontal=1.2, excl_vertical=4.2,
     spread_radius=None,   # set e.g. 6.0 to relax points ~6 m apart laterally
 )
 
@@ -229,6 +206,135 @@ def _fxfy_err(force_vec):
     return np.linalg.norm(fv - tf) / np.linalg.norm(tf)
 
 
+# ---------------------------------------------------------------------------
+# Plotting helpers
+# ---------------------------------------------------------------------------
+BAND = 0.05   # +-5% band drawn on every plot
+
+def _series(curve, comp):
+    """Return (ns, values) for force component `comp` (0=Fx, 1=Fy)."""
+    ns = [c[0] for c in curve]
+    vals = [c[1][comp] if c[1] is not None else np.nan for c in curve]
+    return ns, vals
+
+def _relerr_series(curve, comp):
+    """Return (ns, signed relative error in %) for component `comp`."""
+    ns = [c[0] for c in curve]
+    tf = TRUE_FORCE[comp]
+    vals = [100.0 * (c[1][comp] - tf) / abs(tf) if c[1] is not None else np.nan
+            for c in curve]
+    return ns, vals
+
+
+def _plot_abs_component(all_curves, comp, label, fname):
+    """Single-component absolute force convergence with +-5% band."""
+    true = TRUE_FORCE[comp]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for name, curve in all_curves.items():
+        if not curve:
+            continue
+        ns, vals = _series(curve, comp)
+        ax.plot(ns, vals, "-o", label=name, markersize=5)
+    ax.axhline(true, ls="--", color="0.4", label=f"true {label}")
+    ax.axhspan(true * (1 - BAND), true * (1 + BAND), color="0.5", alpha=0.15,
+               label="+-5% band")
+    ax.set_xlabel("number of training drones")
+    ax.set_ylabel(f"{label} [N]")
+    ax.set_title(f"Sensitivity study: {label} convergence (+-5% band)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+    fig.tight_layout()
+    fig.savefig(fname, dpi=150)
+    return fig
+
+
+def _plot_abs_combined(all_curves, fname):
+    """Fx and Fy absolute force convergence stacked, each with +-5% band."""
+    fig, axes = plt.subplots(2, 1, figsize=(9, 9), sharex=True)
+    for comp, (ax, label) in enumerate(zip(axes, ("Fx", "Fy"))):
+        true = TRUE_FORCE[comp]
+        for name, curve in all_curves.items():
+            if not curve:
+                continue
+            ns, vals = _series(curve, comp)
+            ax.plot(ns, vals, "-o", label=name, markersize=5)
+        ax.axhline(true, ls="--", color="0.4", label=f"true {label}")
+        ax.axhspan(true * (1 - BAND), true * (1 + BAND), color="0.5",
+                   alpha=0.15, label="+-5% band")
+        ax.set_ylabel(f"{label} [N]")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, loc="best")
+    axes[1].set_xlabel("number of training drones")
+    axes[0].set_title("Sensitivity study: Fx / Fy convergence (+-5% band)")
+    fig.tight_layout()
+    fig.savefig(fname, dpi=150)
+    return fig
+
+
+def _plot_relerr_component(all_curves, comp, label, fname):
+    """Single-component signed relative error (%) with +-5% band."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for name, curve in all_curves.items():
+        if not curve:
+            continue
+        ns, vals = _relerr_series(curve, comp)
+        ax.plot(ns, vals, "-o", label=name, markersize=5)
+    ax.axhline(0.0, ls="--", color="0.4", label="exact")
+    ax.axhspan(-100 * BAND, 100 * BAND, color="0.5", alpha=0.15,
+               label="+-5% band")
+    ax.set_xlabel("number of training drones")
+    ax.set_ylabel(f"{label} relative error [%]")
+    ax.set_title(f"Sensitivity study: {label} relative error (+-5% band)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+    fig.tight_layout()
+    fig.savefig(fname, dpi=150)
+    return fig
+
+def _plot_relerr_per_phase(all_curves, fname):
+    """In-plane (Fx,Fy) relative error (%) vs phase index, one line per config,
+    with +-5% band. Phase 0 is the initial run; 1..N are adaptive phases."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for name, curve in all_curves.items():
+        if not curve:
+            continue
+        phases = list(range(len(curve)))
+        vals = [100.0 * _fxfy_err(fv) for _, fv in curve]
+        ax.plot(phases, vals, "-o", label=name, markersize=5)
+    ax.axhline(0.0, ls="--", color="0.4", label="exact")
+    ax.axhspan(0.0, 100 * BAND, color="0.5", alpha=0.15, label="+-5% band")
+    ax.set_xlabel("phase index (0 = initial, 1..N = adaptive)")
+    ax.set_ylabel("in-plane (Fx,Fy) relative error [%]")
+    ax.set_title("Sensitivity study: Fx/Fy relative error per phase (+-5% band)")
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+    fig.tight_layout()
+    fig.savefig(fname, dpi=150)
+    return fig
+
+def _plot_relerr_combined(all_curves, fname):
+    """Fx and Fy signed relative error (%) stacked, each with +-5% band."""
+    fig, axes = plt.subplots(2, 1, figsize=(9, 9), sharex=True)
+    for comp, (ax, label) in enumerate(zip(axes, ("Fx", "Fy"))):
+        for name, curve in all_curves.items():
+            if not curve:
+                continue
+            ns, vals = _relerr_series(curve, comp)
+            ax.plot(ns, vals, "-o", label=name, markersize=5)
+        ax.axhline(0.0, ls="--", color="0.4", label="exact")
+        ax.axhspan(-100 * BAND, 100 * BAND, color="0.5", alpha=0.15,
+                   label="+-5% band")
+        ax.set_ylabel(f"{label} rel. error [%]")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, loc="best")
+    axes[1].set_xlabel("number of training drones")
+    axes[0].set_title("Sensitivity study: Fx / Fy relative error (+-5% band)")
+    fig.tight_layout()
+    fig.savefig(fname, dpi=150)
+    return fig
+
+
 def main():
     all_curves = {}
     for name, init, cfg in CONFIGS:
@@ -251,28 +357,35 @@ def main():
             cells.append(f"{n_d}:{_fxfy_err(fv):.3g}")
         print(f"  {name:18s}: " + "  ".join(cells))
 
-    # ---- convergence plot: Fx and Fy separately, one line per config ----
-    fig, axes = plt.subplots(2, 1, figsize=(9, 9), sharex=True)
-    for name, curve in all_curves.items():
-        if not curve:
-            continue
-        ns = [c[0] for c in curve]
-        fx = [c[1][0] if c[1] is not None else np.nan for c in curve]
-        fy = [c[1][1] if c[1] is not None else np.nan for c in curve]
-        axes[0].plot(ns, fx, "-o", label=name, markersize=5)
-        axes[1].plot(ns, fy, "-o", label=name, markersize=5)
-    axes[0].axhline(TRUE_FORCE[0], ls="--", color="0.5", label="true Fx")
-    axes[1].axhline(TRUE_FORCE[1], ls="--", color="0.5", label="true Fy")
-    axes[0].set_ylabel("Fx [N]"); axes[1].set_ylabel("Fy [N]")
-    axes[1].set_xlabel("number of training drones")
-    axes[0].set_title("Sensitivity study: Fx / Fy convergence")
-    for ax in axes:
-        ax.grid(True, alpha=0.3); ax.legend(fontsize=8, loc="best")
-    fig.tight_layout()
-    os.makedirs("plots", exist_ok=True)
-    out = os.path.join("plots", "sensitivity_fx_fy.pdf")
-    fig.savefig(out)
-    print(f"\nsaved {out}")
+    # ---- generate all plots as PNG ----
+    os.makedirs(PLOT_DIR, exist_ok=True)
+    figs = []
+
+    figs.append(_plot_abs_combined(
+        all_curves, os.path.join(PLOT_DIR, "sensitivity_fx_fy.png")))
+    figs.append(_plot_abs_component(
+        all_curves, 0, "Fx", os.path.join(PLOT_DIR, "sensitivity_fx.png")))
+    figs.append(_plot_abs_component(
+        all_curves, 1, "Fy", os.path.join(PLOT_DIR, "sensitivity_fy.png")))
+
+    figs.append(_plot_relerr_combined(
+        all_curves, os.path.join(PLOT_DIR, "sensitivity_fx_fy_relerr.png")))
+    figs.append(_plot_relerr_component(
+        all_curves, 0, "Fx", os.path.join(PLOT_DIR, "sensitivity_fx_relerr.png")))
+    figs.append(_plot_relerr_component(
+        all_curves, 1, "Fy", os.path.join(PLOT_DIR, "sensitivity_fy_relerr.png")))
+
+    figs.append(_plot_relerr_per_phase(
+        all_curves, os.path.join(PLOT_DIR, "sensitivity_relerr_per_phase.png")))
+    
+    for f in ("sensitivity_fx_fy", "sensitivity_fx", "sensitivity_fy",
+              "sensitivity_fx_fy_relerr", "sensitivity_fx_relerr",
+              "sensitivity_fy_relerr"):
+        print(f"saved {os.path.join(PLOT_DIR, f + '.png')}")
+
+    # ---- show them all on screen at the end of the run ----
+    plt.show()
+
     return all_curves
 
 

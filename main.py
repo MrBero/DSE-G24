@@ -9,30 +9,31 @@ COMMON = dict(
     stl_filepath="input_stls/Aerospecial_building4.stl",
     cfd_filepath="inputs/csv_with_everything.pkl",
     stl_scale=1.0 / 1000.0,
-    res=50,
+    res=30,
     v_inf=(0.0, 13.6, 0.0),
     bounds_input=np.array([[-100, 100], [30, 275], [0, 80]]),
     n_restarts=6,
     fit_pressure=True,
     posterior_batch=100,
     compute_variance=True,
-    var_res=50,         # variance computed on a 50^3 grid, interpolated up to res^3 (velocity stays full res)
+    var_res=50,
 )
 
 # initial sampling: tilted cylinder (gives us cylinder_geom for the adaptive regions)
 INITIAL_SAMPLING = dict(
     sample_method="cylinder",
-    sample_config={"r_factor": 1.5, "h_factor": 1.5, "tilt_deg": 10,
-                   "n_points": 80, "front_frac": 0.5, "front_half_angle_deg": 45.0},
+    sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
+                   "n_points": 100, "front_frac": 0.25, "front_half_angle_deg": 45,
+                   "top_cap": True, "top_cap_frac": 0.2},
 )
 
 # how many adaptive phases to run (0 -> behaves exactly like the old single run)
-N_PHASES = 6
+N_PHASES = 3
 
-# optional FINAL top-cap phase: places a few drones on the cylinder top cap,
+# DEPRECATED, USE TOP_CAP IN INITIAL SAMPLING optional FINAL top-cap phase: places a few drones on the cylinder top cap,
 # where momentum may escape the open control volume. On by default.
 TOP_CAP_PHASE = False
-TOP_CAP_N = 30            # number of cap drones
+TOP_CAP_N = 50            # number of cap drones
 TOP_CAP_Z_OFFSET = 0.0   # place cap at z_top (of the CYLINDER) + this
 
 # Known true force [Fx, Fy, Fz] in N, for convergence comparison each phase.
@@ -45,13 +46,13 @@ ADAPTIVE_CFG = dict(
     w_var=0.2, w_grad=0.4, w_vort=0.4,   # favor gradient + vorticity
     # weighted-LHS candidate pool over the thick tilted cylinder shell
     pool_size=4000, resample_size=600, score_beta=2.0,
-    shell_thick_in=0.50, shell_thick_out=0.30,   # shell spans 0.7R .. 1.3R
+    shell_thick_in=0.20, shell_thick_out=0.20,   # shell spans 0.7R .. 1.3R
     front_frac=0.5, front_half_angle_deg=60.0,   # bias toward the wake side
     # per-phase budget (mostly on-cylinder)
-    n_new=80, frac_region1=0.6, frac_region2=0.25, frac_region3=0.15, # 1 - face, 2 - in, 3 - out
+    n_new=100, frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
     # spacing: hard drone limit + optional spread relaxation
-    excl_horizontal=4.2, excl_vertical=4.2,
-    spread_radius=None,   # set e.g. 6.0 to relax points ~6 m apart laterally
+    excl_horizontal=1.2, excl_vertical=4.2,
+    spread_radius=None   # set e.g. 6.0 to relax points ~6 m apart laterally
 )
 
 # Optional PER-PHASE overrides of ADAPTIVE_CFG. Map phase number (1-based, the
@@ -77,6 +78,7 @@ def _phase_cfg(phase):
     """Merge ADAPTIVE_CFG with any per-phase overrides for this phase."""
     cfg = dict(ADAPTIVE_CFG)
     cfg.update(ADAPTIVE_CFG_PER_PHASE.get(phase, {}))
+    cfg["pool_seed"] = ADAPTIVE_CFG.get("seed", 7) + phase   # fresh pool each phase
     return cfg
 
 
@@ -116,6 +118,44 @@ def _print_rmse(phase, result):
     elif fmag is not None:
         print(f"    momentum force    : |F|={fmt(fmag)}   [{m.get('momentum_n')} surface pts]")
 
+def count_front_back(accumulated, stl_mesh, v_inf, stl_scale=1.0):
+    """Count accumulated drones upstream vs downstream of the building center,
+    split by the plane through the center normal to the horizontal flow.
+
+    'front'  = downstream side (same direction the wind blows, +s)
+    'behind' = upstream side (into the wind, -s)
+    Uses the same horizontal centroid P0 and streamwise unit vector s as the
+    cylinder sampler, so the dividing plane matches the cylinder's center.
+    """
+    
+    V = np.asarray(stl_mesh.vertices) * stl_scale   # match coords to training pts
+
+    print(f"    [debug] V x-range: {V[:,0].min():.3g}..{V[:,0].max():.3g}  "
+          f"P0={0.5*(V[:,0].min()+V[:,0].max()):.3g}, "
+          f"{0.5*(V[:,1].min()+V[:,1].max()):.3g}")
+
+    v = np.asarray(v_inf, float)
+    s = np.array([v[0], v[1], 0.0])
+    s = s / np.linalg.norm(s)                        # downstream (+wake) direction
+
+    P0 = np.array([0.5 * (V[:, 0].min() + V[:, 0].max()),
+                   0.5 * (V[:, 1].min() + V[:, 1].max())])
+
+    pts = np.asarray(accumulated, float)
+    proj = (pts[:, :2] - P0[None, :]) @ s[:2]        # signed streamwise distance
+
+    eps = 1e-9
+    n_front = int(np.sum(proj > eps))                # downstream
+    n_back = int(np.sum(proj < -eps))               # upstream
+    n_on = int(np.sum(np.abs(proj) <= eps))          # exactly on the plane
+
+    print("\n=== front/back split of accumulated drones (along flow) ===")
+    print(f"    total              : {len(pts)}")
+    print(f"    front (downstream) : {n_front}  ({100*n_front/len(pts):.1f}%)")
+    print(f"    behind (upstream)  : {n_back}  ({100*n_back/len(pts):.1f}%)")
+    if n_on:
+        print(f"    on dividing plane  : {n_on}")
+    return n_front, n_back
 
 def main():
     # ---------- phase 0: initial cylinder run ----------
@@ -232,7 +272,9 @@ def main():
             row += (f"  {_relc(err[0], tf[0]):8.4g}  {_relc(err[1], tf[1]):8.4g}  "
                     f"{_relc(err[2], tf[2]):8.4g}  {relF:8.4g}")
         print(row)
-
+    
+    count_front_back(accumulated, results[-1]["stl_mesh"],
+                     COMMON["v_inf"], stl_scale=1.0)
     # per-component force-convergence plot (annotated with drone counts)
     plot_force_convergence(force_curve, true_force=TRUE_FORCE, out_dir="plots")
 
