@@ -89,3 +89,43 @@ def surface_force(
 
 	return compute_forces(mesh, rho)
 
+
+
+from cylinder_geom import calculate_wake_cylinder_parameters, generate_cylindrical_sampling_coordinates, generate_momentum_integration_mesh, visualize_points
+if __name__ == "__main__":
+	STL_PATH        = r"input_stls/Aerospecial_building4.stl"
+	V_INF           = np.array([0.0, 13.6, 0.0])   
+	R_FACTOR        = 3    # cylinder radius = R_FACTOR * building footprint circumradius
+	H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
+	TILT_DEG        = 20   # downstream wake tilt in degrees
+	import trimesh
+	stl_mesh = trimesh.load_mesh(STL_PATH)
+	stl_mesh.apply_scale(1.0 / 1000.0)
+	bot,top,radius = calculate_wake_cylinder_parameters(
+		stl_mesh, R_FACTOR, H_FACTOR, V_INF, tilt_deg=TILT_DEG
+	)
+
+	print("bottom center : ", bot)
+	print("top center    : ", top)
+	print("radius        : ", radius)
+
+	mesh = generate_momentum_integration_mesh(
+	bot, top, radius,
+	total_points=100_000,
+	cap_top=True,
+	)
+	from cfd_sampler import build_cfd_sampler
+	import pandas as pd
+	df = pd.read_pickle(r"inputs/csv_with_everything.pkl")
+	cfd_sample = build_cfd_sampler(
+		df, n_points=4, sharpness=2.0, #cache_path=CACHE_PATH
+	)
+	cfd_at_drone = cfd_sample(mesh.points)
+	training_vels = cfd_at_drone[:, :3]
+	training_pres = cfd_at_drone[:, 3]
+
+	mesh['velocity'] = training_vels
+	mesh['pressure'] = training_pres
+
+	F =  surface_force(mesh, rho=1.225)
+	print(F)

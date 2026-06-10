@@ -27,6 +27,7 @@ from cylinder_geom import (
 	calculate_wake_cylinder_parameters,
 	generate_cylindrical_sampling_coordinates,
 	generate_momentum_integration_mesh,
+	visualize_points
 )
 from cfd_sampler import build_cfd_sampler
 from flowpanelwrapper import FLOWPanelSolver
@@ -48,11 +49,11 @@ STL_SCALE       = 1.0 / 1000.0                  # STL is in mm, convert to m
 # Cylinder geometry multipliers (passed to calculate_wake_cylinder_parameters)
 R_FACTOR        = 3    # cylinder radius = R_FACTOR * building footprint circumradius
 H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
-TILT_DEG        = 23.0   # downstream wake tilt in degrees
+TILT_DEG        = 0   # downstream wake tilt in degrees
 
 # Sampling
-N_DRONES_SIDE  = 270    # points used to train the GPR
-N_DRONES_TOP = 30
+N_DRONES_SIDE  = 300    # points used to train the GPR
+N_DRONES_TOP = 100
 N_MOM_POINTS    = 100_000 # points on the momentum integration surface
 
 # GPR settings
@@ -137,6 +138,9 @@ def run():
 		top_points=N_DRONES_TOP,
 		bot_points=0
 	)
+	visualize_points(drone_pts, point_size=5)
+	print(f"  total points  : {drone_pts.shape[0]}")
+
 	print(f"  drone points  : {drone_pts.shape[0]}")
 	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
