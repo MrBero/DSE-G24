@@ -13,6 +13,7 @@ Inputs (hard-coded paths, edit below if needed):
     input_stls/Aerospecial_building4.stl -- building geometry STL
 """
 
+import time
 import numpy as np
 import pandas as pd
 import trimesh
@@ -36,7 +37,7 @@ from momentum import surface_force
 
 STL_PATH        = r"input_stls/Aerospecial_building4.stl"
 CFD_PKL_PATH    = r"inputs/csv_with_everything.pkl"
-CACHE_PATH      = r"inputs/cfd_sampler_cache.joblib"
+#CACHE_PATH      = r"inputs/cfd_sampler_cache.joblib" #not really necessary in my experience doesn't speed it up as it still has to load the 20 000 000 points
 
 V_INF           = np.array([0.0, 12.6, 0.0])   # free-stream velocity (m/s)
 RHO             = 1.225                          # air density (kg/m^3)
@@ -72,70 +73,97 @@ def predict_batched(estimator, pts: np.ndarray, batch: int = 4_000) -> np.ndarra
 		out[i:i + batch] = estimator.predict(pts[i:i + batch])
 	return out
 
+
+def _fmt(seconds: float) -> str:
+	"""Format a duration as a human-readable string."""
+	if seconds < 60:
+		return f"{seconds:.2f}s"
+	m, s = divmod(seconds, 60)
+	return f"{int(m)}m {s:.2f}s"
+
 # =============================================================================
 # Main pipeline
 # =============================================================================
 
 def run():
+	pipeline_start = time.perf_counter()
+
 	# ------------------------------------------------------------------
 	# 1. Load geometry and start panel solver
 	# ------------------------------------------------------------------
 	print("Loading STL...")
+	t0 = time.perf_counter()
 	stl_mesh = trimesh.load_mesh(STL_PATH)
 	stl_mesh.apply_scale(STL_SCALE)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	print("Starting Julia panel server...")
+	t0 = time.perf_counter()
 	solver = FLOWPanelSolver(stl_mesh, V_INF, julia_script="FP.jl",
 	                         julia_bin="julia", verbose=True)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# ------------------------------------------------------------------
 	# 2. Determine cylinder geometry from the building mesh
 	# ------------------------------------------------------------------
 	print("Computing cylinder geometry...")
+	t0 = time.perf_counter()
 	center_bot, center_top, radius = calculate_wake_cylinder_parameters(
 		stl_mesh, R_FACTOR, H_FACTOR, V_INF, tilt_deg=TILT_DEG
 	)
 	print(f"  bottom center : {center_bot}")
 	print(f"  top center    : {center_top}")
 	print(f"  radius        : {radius:.4f} m")
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# ------------------------------------------------------------------
 	# 3. Generate sampling coordinates (drone points) and momentum mesh
 	# ------------------------------------------------------------------
 	print("Generating sampling coordinates...")
+	t0 = time.perf_counter()
 	drone_pts = generate_cylindrical_sampling_coordinates(
 		center_bot, center_top, radius,
 		total_points=N_DRONE_POINTS,
 		cap_bottom=False, cap_top=True,
 	)
 	print(f"  drone points  : {drone_pts.shape[0]}")
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	print("Generating momentum integration mesh...")
+	t0 = time.perf_counter()
 	mom_mesh = generate_momentum_integration_mesh(
 		center_bot, center_top, radius,
 		total_points=N_MOM_POINTS,
 		cap_bottom=False, cap_top=True,
 	)
 	print(f"  momentum pts  : {mom_mesh.n_points}")
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# ------------------------------------------------------------------
 	# 4. Sample CFD at drone locations
 	# ------------------------------------------------------------------
 	print("Loading CFD data and building IDW sampler...")
+	t0 = time.perf_counter()
 	df = pd.read_pickle(CFD_PKL_PATH)
 	cfd_sample = build_cfd_sampler(
-		df, n_points=IDW_N_POINTS, sharpness=IDW_SHARPNESS, cache_path=CACHE_PATH
+		df, n_points=IDW_N_POINTS, sharpness=IDW_SHARPNESS, #cache_path=CACHE_PATH
 	)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
+	print("Sampling CFD at drone points...")
+	t0 = time.perf_counter()
 	cfd_at_drone = cfd_sample(drone_pts)          # (N_drone, 4): [vx,vy,vz,p]
 	training_vels = cfd_at_drone[:, :3]           # (N_drone, 3)
 	training_pres = cfd_at_drone[:, 3]            # (N_drone,)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# ------------------------------------------------------------------
 	# 5. Get panel-solver (potential flow) velocities at drone points
 	# ------------------------------------------------------------------
 	print("Evaluating potential-flow prior at drone points...")
+	t0 = time.perf_counter()
 	prior_at_drone = solver.velocity(drone_pts, blank_interior=False)  # (N_drone, 3)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	if np.isnan(prior_at_drone).any():
 		raise RuntimeError("NaNs in potential-flow prior at drone points.")
@@ -144,6 +172,7 @@ def run():
 	# 6. Fit divergence-free velocity GPR on residuals
 	# ------------------------------------------------------------------
 	print("Fitting velocity GPR...")
+	t0 = time.perf_counter()
 	vel_residuals = training_vels - prior_at_drone   # (N_drone, 3)
 
 	vel_gpr = DivergenceFreeGPR(
@@ -153,12 +182,14 @@ def run():
 
 	print(f"  ell={vel_gpr.ell_}  var={vel_gpr.var_:.4g}  "
 	      f"noise={vel_gpr.noise_:.4g}  nll={vel_gpr.nll_:.6g}")
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# ------------------------------------------------------------------
 	# 7. Fit scalar pressure GPR (no prior subtracted -- panel solver
 	#    produces no pressure, so raw CFD pressure is the target)
 	# ------------------------------------------------------------------
 	print("Fitting pressure GPR...")
+	t0 = time.perf_counter()
 	p_kernel = Matern(
 		length_scale=[1.0, 1.0, 1.0],
 		length_scale_bounds=(1e-2, 1e3),
@@ -169,32 +200,42 @@ def run():
 		n_restarts_optimizer=8, random_state=0,
 	).fit(drone_pts, training_pres)
 	print(f"  fitted pressure kernel: {p_gpr.kernel_}")
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# ------------------------------------------------------------------
 	# 8. Predict velocity + pressure at momentum mesh points,
 	#    attach to mesh, compute surface force
 	# ------------------------------------------------------------------
 	print("Evaluating potential-flow prior at momentum mesh points...")
+	t0 = time.perf_counter()
 	mom_pts = np.asarray(mom_mesh.points, dtype=float)
 	prior_at_mom = solver.velocity(mom_pts, blank_interior=True)   # (N_mom, 3)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	print("Predicting velocity posterior at momentum mesh points...")
+	t0 = time.perf_counter()
 	mom_vel = vel_gpr.predict(mom_pts, prior_at_mom)               # (N_mom, 3)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	print("Predicting pressure posterior at momentum mesh points...")
+	t0 = time.perf_counter()
 	mom_pres = predict_batched(p_gpr, mom_pts, batch=POSTERIOR_BATCH)  # (N_mom,)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	# Attach fields directly
 	mom_mesh["velocity"] = mom_vel
 	mom_mesh["pressure"] = mom_pres
 
 	print("Computing surface force...")
+	t0 = time.perf_counter()
 	F = surface_force(mom_mesh, rho=RHO)
+	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
 
 	F_mag = float(np.linalg.norm(F))
 	print("\n=== Result ===")
-	print(f"Force vector: Fx={F[0]/1000:.3f}e3  Fy={F[1]/1000:.3f}e3  Fz={F[2]/1000:.3f}e3 kN")
+	print(f"Force vector: Fx={F[0]/1000:.3f}  Fy={F[1]/1000:.3f}  Fz={F[2]/1000:.3f} kN")
 	print(f"  |F|          : {F_mag:.4g} N")
+	print(f"\n=== Total pipeline time: {_fmt(time.perf_counter() - pipeline_start)} ===")
 
 	# ------------------------------------------------------------------
 	# Cleanup
