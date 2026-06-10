@@ -44,13 +44,14 @@ RHO             = 1.225                          # air density (kg/m^3)
 STL_SCALE       = 1.0 / 1000.0                  # STL is in mm, convert to m
 
 # Cylinder geometry multipliers (passed to calculate_wake_cylinder_parameters)
-R_FACTOR        = 1.5    # cylinder radius = R_FACTOR * building footprint circumradius
+R_FACTOR        = 3    # cylinder radius = R_FACTOR * building footprint circumradius
 H_FACTOR        = 1.2    # cylinder height = H_FACTOR * building height
 TILT_DEG        = 23.0   # downstream wake tilt in degrees
 
 # Sampling
-N_DRONE_POINTS  = 300    # points used to train the GPR
-N_MOM_POINTS    = 25_000 # points on the momentum integration surface
+N_DRONES_SIDE  = 280    # points used to train the GPR
+N_DRONES_TOP = 20
+N_MOM_POINTS    = 100_000 # points on the momentum integration surface
 
 # GPR settings
 N_RESTARTS      = 8      # L-BFGS-B (Limited-memory Broyden-Fletcher-Goldfarb-Shanno Bounded) restarts for velocity hyperparameter optimisation
@@ -123,8 +124,10 @@ def run():
 	t0 = time.perf_counter()
 	drone_pts = generate_cylindrical_sampling_coordinates(
 		center_bot, center_top, radius,
-		total_points=N_DRONE_POINTS,
-		cap_bottom=False, cap_top=True,
+		z_clearance=.1,
+		side_points=N_DRONES_SIDE,
+		top_points=N_DRONES_TOP,
+		bot_points=0
 	)
 	print(f"  drone points  : {drone_pts.shape[0]}")
 	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")

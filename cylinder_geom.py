@@ -186,147 +186,143 @@ def generate_momentum_integration_mesh(
 
 
 def generate_cylindrical_sampling_coordinates(
-    center_bot: np.ndarray,
-    center_top: np.ndarray,
-    radius: float,
-    total_points: int = 100_000,
-    cap_bottom: bool = False,
-    cap_top: bool = False,
-    z_clearance: float = 0.1
+	center_bot: np.ndarray,
+	center_top: np.ndarray,
+	radius: float,
+	z_clearance: float = 0.1,
+	side_points: int = 0,
+	top_points: int = 0,
+	bot_points: int = 0,
 ) -> np.ndarray:
-    """
-    Build an oblique cylinder point cloud: horizontal flat caps, slanted wall.
-    Returns an (N, 3) numpy array of coordinates.
-    """
-    center_bot = np.asarray(center_bot, dtype=float)
-    center_top = np.asarray(center_top, dtype=float)
+	center_bot = np.asarray(center_bot, dtype=float)
+	center_top = np.asarray(center_top, dtype=float)
 
-    cx_b, cy_b, z_bottom = center_bot
-    cx_t, cy_t, z_top    = center_top
+	axis_vec    = center_top - center_bot
+	axis_length = float(np.linalg.norm(axis_vec))
+	axis_unit   = axis_vec / axis_length
 
-    # Apply z-clearance offset to the vertical bounds
-    z_bottom += z_clearance
-    z_top += z_clearance
+	# Shift the bottom center along the axis vector so that the z component
+	# of the shift equals z_clearance. This preserves the oblique angle.
+	# axis_unit[2] is the z-component of the unit axis vector.
+	z_shift_along_axis = z_clearance / axis_unit[2]
+	center_bot_shifted = center_bot + axis_unit * z_shift_along_axis
 
-    axis_vec    = center_top - center_bot
-    axis_length = float(np.linalg.norm(axis_vec))
+	cx_b, cy_b, z_bottom = center_bot_shifted
+	cx_t, cy_t, z_top    = center_top
 
-    n_caps       = int(cap_top) + int(cap_bottom)
-    lateral_area = 2 * np.pi * radius * axis_length
-    cap_area     = np.pi * radius ** 2
-    total_area   = lateral_area + n_caps * cap_area
+	# Recompute axis length after shifting the bottom up
+	axis_length = float(np.linalg.norm(center_top - center_bot_shifted))
 
-    s = np.sqrt(total_area / total_points)
+	# --- Lateral (side) surface sampling ---
+	lateral_area = 2 * np.pi * radius * axis_length
+	s_side = np.sqrt(lateral_area / side_points)
 
-    T         = max(4, round(2 * np.pi * radius / s))
-    Z         = max(1, round(axis_length / s))
-    cap_r_res = max(1, round(radius / s))
+	T = max(4, round(2 * np.pi * radius / s_side))
+	Z = max(1, round(axis_length / s_side))
 
-    thetas = np.linspace(0, 2 * np.pi, T, endpoint=False)
-    dtheta = 2 * np.pi / T
-    
-    # Apply half-step shift to odd rings to stagger points
-    shifts = (np.arange(Z + 1) % 2) * (dtheta / 2.0)
-    thetas_2d = thetas[None, :] + shifts[:, None]
+	dtheta    = 2 * np.pi / T
+	thetas    = np.linspace(0, 2 * np.pi, T, endpoint=False)
+	shifts    = (np.arange(Z + 1) % 2) * (dtheta / 2.0)
+	thetas_2d = thetas[None, :] + shifts[:, None]
 
-    cos_t_2d = np.cos(thetas_2d)
-    sin_t_2d = np.sin(thetas_2d)
+	cos_t_2d = np.cos(thetas_2d)
+	sin_t_2d = np.sin(thetas_2d)
 
-    # ------------------------------------------------------------------
-    # 1. Lateral surface vertices
-    # ------------------------------------------------------------------
-    alphas   = np.linspace(0.0, 1.0, Z + 1)
-    cx_rings = cx_b + alphas * (cx_t - cx_b)
-    cy_rings = cy_b + alphas * (cy_t - cy_b)
-    z_rings  = z_bottom + alphas * (z_top - z_bottom)
+	alphas   = np.linspace(0.0, 1.0, Z + 1)
+	cx_rings = cx_b + alphas * (cx_t - cx_b)
+	cy_rings = cy_b + alphas * (cy_t - cy_b)
+	z_rings  = z_bottom + alphas * (z_top - z_bottom)
 
-    lat_x = cx_rings[:, None] + radius * cos_t_2d
-    lat_y = cy_rings[:, None] + radius * sin_t_2d
-    lat_z = np.tile(z_rings[:, None], (1, T))
+	lat_x = cx_rings[:, None] + radius * cos_t_2d
+	lat_y = cy_rings[:, None] + radius * sin_t_2d
+	lat_z = np.tile(z_rings[:, None], (1, T))
 
-    lat_pts = np.stack(
-        [lat_x.ravel(), lat_y.ravel(), lat_z.ravel()], axis=1
-    )
+	lat_pts = np.stack(
+		[lat_x.ravel(), lat_y.ravel(), lat_z.ravel()], axis=1
+	)
 
-    # ------------------------------------------------------------------
-    # 2. Cap interior vertices
-    # ------------------------------------------------------------------
-    all_pts_list = [lat_pts]
+	all_pts_list = [lat_pts]
 
-    if cap_bottom or cap_top:
-        cap_radii = radius * np.arange(cap_r_res - 1, 0, -1) / cap_r_res
-        
-        def make_cap_pts(cx, cy, z, shift):
-            pts = []
-            if cap_r_res > 1:
-                cap_thetas = thetas + shift
-                c_t = np.cos(cap_thetas)
-                s_t = np.sin(cap_thetas)
-                for r_c in cap_radii:
-                    xs = cx + r_c * c_t
-                    ys = cy + r_c * s_t
-                    zs = np.full(T, z)
-                    pts.append(np.stack([xs, ys, zs], axis=1))
-            pts.append(np.array([[cx, cy, z]]))
-            return np.vstack(pts)
+	# --- Cap sampling ---
+	if bot_points > 0 or top_points > 0:
+		cap_area = np.pi * radius ** 2
 
-    if cap_bottom:
-        bot_cap_pts = make_cap_pts(cx_b, cy_b, z_bottom, shifts[0])
-        all_pts_list.append(bot_cap_pts)
+		def make_cap_pts(cx, cy, z, shift, n_cap_points):
+			s_cap     = np.sqrt(cap_area / n_cap_points)
+			cap_r_res = max(1, round(radius / s_cap))
+			T_cap     = max(4, round(2 * np.pi * radius / s_cap))
+			cap_thetas = np.linspace(0, 2 * np.pi, T_cap, endpoint=False) + shift
+			cap_radii  = radius * np.arange(cap_r_res - 1, 0, -1) / cap_r_res
 
-    if cap_top:
-        top_cap_pts = make_cap_pts(cx_t, cy_t, z_top, shifts[-1])
-        all_pts_list.append(top_cap_pts)
+			pts = []
+			if cap_r_res > 1:
+				c_t = np.cos(cap_thetas)
+				s_t = np.sin(cap_thetas)
+				for r_c in cap_radii:
+					xs = cx + r_c * c_t
+					ys = cy + r_c * s_t
+					zs = np.full(T_cap, z)
+					pts.append(np.stack([xs, ys, zs], axis=1))
+			pts.append(np.array([[cx, cy, z]]))
+			return np.vstack(pts)
 
-    return np.vstack(all_pts_list)
+		if bot_points > 0:
+			bot_cap_pts = make_cap_pts(cx_b, cy_b, z_bottom, shifts[0], bot_points)
+			all_pts_list.append(bot_cap_pts)
+
+		if top_points > 0:
+			top_cap_pts = make_cap_pts(cx_t, cy_t, z_top, shifts[-1], top_points)
+			all_pts_list.append(top_cap_pts)
+
+	return np.vstack(all_pts_list)
 
 
 def calculate_wake_cylinder_parameters(
-    stl_mesh, 
-    r_factor, 
-    h_factor, 
-    v_inf,
-    tilt_deg=23.0
+	stl_mesh, 
+	r_factor, 
+	h_factor, 
+	v_inf,
+	tilt_deg=23.0
 ):
-    vertices = np.asarray(stl_mesh.vertices)
+	vertices = np.asarray(stl_mesh.vertices)
 
-    # Downstream unit vector (horizontal only, for tilt)
-    v_inf_array = np.asarray(v_inf, dtype=float)
-    wind_dir_xy = np.array([v_inf_array[0], v_inf_array[1], 0.0])
-    norm = np.linalg.norm(wind_dir_xy)
-    
-    if norm < 1e-12:
-        raise ValueError("v_inf has no horizontal component.")
-    wind_dir_xy = wind_dir_xy / norm
+	# Downstream unit vector (horizontal only, for tilt)
+	v_inf_array = np.asarray(v_inf, dtype=float)
+	wind_dir_xy = np.array([v_inf_array[0], v_inf_array[1], 0.0])
+	norm = np.linalg.norm(wind_dir_xy)
+	
+	if norm < 1e-12:
+		raise ValueError("v_inf has no horizontal component.")
+	wind_dir_xy = wind_dir_xy / norm
 
-    # Smallest enclosing circle radius from convex hull of footprint
-    xy_coords = np.unique(vertices[:, :2], axis=0)
-    hull_pts = xy_coords[ConvexHull(xy_coords).vertices]
-    footprint_circumradius = 0.5 * cdist(hull_pts, hull_pts).max()
+	# Smallest enclosing circle radius from convex hull of footprint
+	xy_coords = np.unique(vertices[:, :2], axis=0)
+	hull_pts = xy_coords[ConvexHull(xy_coords).vertices]
+	footprint_circumradius = 0.5 * cdist(hull_pts, hull_pts).max()
 
-    cylinder_radius = r_factor * footprint_circumradius
+	cylinder_radius = r_factor * footprint_circumradius
 
-    # Cylinder height and vertical extents
-    ground_level = vertices[:, 2].min()
-    mesh_top = vertices[:, 2].max()
-    z_mid = 0.5 * (ground_level + mesh_top)
-    
-    cylinder_height = h_factor * (mesh_top - ground_level)
+	# Cylinder height and vertical extents
+	ground_level = vertices[:, 2].min()
+	mesh_top = vertices[:, 2].max()
+	z_mid = 0.5 * (ground_level + mesh_top)
+	
+	cylinder_height = h_factor * (mesh_top - ground_level)
 
-    # Horizontal center of bounding box
-    xy_center = np.array([
-        0.5 * (vertices[:, 0].min() + vertices[:, 0].max()),
-        0.5 * (vertices[:, 1].min() + vertices[:, 1].max())
-    ])
+	# Horizontal center of bounding box
+	xy_center = np.array([
+		0.5 * (vertices[:, 0].min() + vertices[:, 0].max()),
+		0.5 * (vertices[:, 1].min() + vertices[:, 1].max())
+	])
 
-    # Tilt: axis leans downstream with height
-    tilt_gradient = np.tan(np.radians(tilt_deg))
+	# Tilt: axis leans downstream with height
+	tilt_gradient = np.tan(np.radians(tilt_deg))
 
-    def get_ring_center(z_level):
-        return np.append(xy_center + tilt_gradient * (z_level - z_mid) * wind_dir_xy[:2], z_level)
+	def get_ring_center(z_level):
+		return np.append(xy_center + tilt_gradient * (z_level - z_mid) * wind_dir_xy[:2], z_level)
 
-    # Grounded to earth (mesh bottom), clearance parameter removed
-    z_bottom = ground_level
-    z_top = z_bottom + cylinder_height
+	# Grounded to earth (mesh bottom), clearance parameter removed
+	z_bottom = ground_level
+	z_top = z_bottom + cylinder_height
 
-    return get_ring_center(z_bottom), get_ring_center(z_top), cylinder_radius
+	return get_ring_center(z_bottom), get_ring_center(z_top), cylinder_radius

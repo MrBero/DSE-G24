@@ -120,7 +120,7 @@ class DivergenceFreeGPR:
 	nll_   : float        -- negative log likelihood at optimum
 	"""
 
-	def __init__(self, n_restarts=8, jitter=1e-6, posterior_batch=4000, seed=0):
+	def __init__(self, n_restarts=8, jitter=1e-4, posterior_batch=4000, seed=0):
 		self.n_restarts = n_restarts
 		self.jitter = jitter
 		self.posterior_batch = posterior_batch
