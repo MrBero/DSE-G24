@@ -39,13 +39,13 @@ STL_PATH        = r"input_stls/Aerospecial_building4.stl"
 CFD_PKL_PATH    = r"inputs/csv_with_everything.pkl"
 #CACHE_PATH      = r"inputs/cfd_sampler_cache.joblib" #not really necessary in my experience doesn't speed it up as it still has to load the 20 000 000 points
 
-V_INF           = np.array([0.0, 12.6, 0.0])   # free-stream velocity (m/s)
+V_INF           = np.array([0.0, 13.6, 0.0])   # free-stream velocity (m/s)
 RHO             = 1.225                          # air density (kg/m^3)
 STL_SCALE       = 1.0 / 1000.0                  # STL is in mm, convert to m
 
 # Cylinder geometry multipliers (passed to calculate_wake_cylinder_parameters)
 R_FACTOR        = 3    # cylinder radius = R_FACTOR * building footprint circumradius
-H_FACTOR        = 1.2    # cylinder height = H_FACTOR * building height
+H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
 TILT_DEG        = 23.0   # downstream wake tilt in degrees
 
 # Sampling
