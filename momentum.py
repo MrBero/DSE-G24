@@ -1,5 +1,6 @@
 import pyvista as pv
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 # def attach_cfd_fields(
@@ -96,7 +97,7 @@ if __name__ == "__main__":
  
 	STL_PATH  = r"input_stls/Aerospecial_building4.stl"
 	V_INF     = np.array([0.0, 13.6, 0.0])
-	R_FACTOR  = 2.3    # cylinder radius  = R_FACTOR  x building footprint circumradius
+	R_FACTOR  = 3    # cylinder radius  = R_FACTOR  x building footprint circumradius
 	H_FACTOR  = 1.4    # cylinder height  = H_FACTOR  x building height
 	TILT_DEG  = 0      # downstream wake tilt (degrees)
  
@@ -207,3 +208,32 @@ if __name__ == "__main__":
 	pl.reset_camera()
  
 	pl.show()
+
+	# --- Convergence Study -------------------------------------------------------
+	print("\nStarting Convergence Study...")
+	# 21 points creates 20 intervals from 300 to 1,000,000
+	n_points_list = np.geomspace(300, 1_000_000, 21, dtype=int)
+	force_y_list = []
+
+	for n_pts in n_points_list:
+		# Generate a fresh mesh for each point count
+		m_study = generate_momentum_integration_mesh(bot, top, radius, total_points=n_pts, cap_top=True)
+		fields_study = cfd_sample(m_study.points)
+		m_study["velocity"] = fields_study[:, :3]
+		m_study["pressure"] = fields_study[:, 3]
+		
+		f_vec = surface_force(m_study, rho=1.225, interior_point=building_centroid)
+		fy = f_vec[1]
+		force_y_list.append(fy)
+		print(f"  [Study] Points: {n_pts:7d} | Fy: {fy:.4f} N")
+
+	plt.figure(figsize=(12, 8))
+	plt.plot(n_points_list, force_y_list, marker='o', linestyle='-', color='#2c3e50', markersize=8, linewidth=2)
+	plt.xscale('log')
+	plt.xlabel('Number of Integration Points (log scale)', fontsize=14, labelpad=12)
+	plt.ylabel('Force Fy (N)', fontsize=14, labelpad=12)
+	plt.title('Surface Force Fy Integration Convergence Study', fontsize=18, pad=20)
+	plt.tick_params(axis='both', which='major', labelsize=12)
+	plt.grid(True, which="both", linestyle='--', alpha=0.5)
+	plt.tight_layout()
+	plt.show()

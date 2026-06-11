@@ -601,11 +601,11 @@ if __name__ == "__main__":
 		side_points=270,
 		top_points=30,
 		)
-	visualize_points(coords, point_size=5)
+	#visualize_points(coords, point_size=5)
 
 	mesh = generate_momentum_integration_mesh(
     bot, top, radius,
-    total_points=100_000,
+    total_points=100,
     cap_top=True,
 	)
 

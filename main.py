@@ -48,15 +48,15 @@ RHO             = 1.225                          # air density (kg/m^3)
 STL_SCALE       = 1.0 / 1000.0                  # STL is in mm, convert to m
 
 # Cylinder geometry multipliers (passed to calculate_wake_cylinder_parameters)
-R_FACTOR        = 3    # cylinder radius = R_FACTOR * building footprint circumradius
+R_FACTOR        = 2.4    # cylinder radius = R_FACTOR * building footprint circumradius
 H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
-TILT_DEG        = 20   # downstream wake tilt in degrees
+TILT_DEG        = 10   # downstream wake tilt in degrees
 
 # Sampling
-N_DRONES_SIDE  = 200    # points used to train the GPR
-N_DRONES_TOP = 50
+N_DRONES_SIDE  = 324    # points used to train the GPR
+N_DRONES_TOP = 76
 N_MOM_POINTS    = 100_000 # points on the momentum integration surface
-drone_depth = 5
+drone_depth = 0
 
 # GPR settings
 N_RESTARTS      = 8      # L-BFGS-B (Limited-memory Broyden-Fletcher-Goldfarb-Shanno Bounded) restarts for velocity hyperparameter optimisation
