@@ -49,7 +49,7 @@ from sensitivity_study_budget_parallel import (
 # Run knobs
 # ---------------------------------------------------------------------------
 SEEDS = [7, 42, 67, 420, 1234, 15, 4321, 1324, 4213, 3, 696, 6767]
-MAX_WORKERS = 4
+MAX_WORKERS = 6
 PLOT_DIR = "plots_multi"
 
 # Defaults applied to EVERY config unless the config overrides them.
