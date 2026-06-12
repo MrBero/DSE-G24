@@ -360,6 +360,7 @@ def run_gpr(
     num_samples=150,
     compute_variance=True,
     var_res=None,
+    grid_eval=False,
     cylinder_geom_override=None,
     compute_force=True,
     momentum_n_points=25000,
@@ -411,61 +412,93 @@ def run_gpr(
         print(f"training points: {training_point_n}")
 
         bar.text('Test points...')
-        # --- Test grid ---
-        gx = np.linspace(bounds[0, 0], bounds[0, 1], res)
-        gy = np.linspace(bounds[1, 0], bounds[1, 1], res)
-        gz = np.linspace(bounds[2, 0], bounds[2, 1], res)
-        x, y, z = np.meshgrid(gx, gy, gz, indexing="ij")
-        test_points = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
-        del x, y, z
-        print(f'testing points: {test_points.shape[0]}')
+        # --- near-surface blanking tolerance (used by the prior closure below) ---
+        # The Julia panel prior is blanked just inside the body and within near_tol
+        # of the surface; defining it here lets BOTH the grid sweep and the
+        # adaptive re-evaluation closure use exactly the same prior.
+        near_tol = 0.04 * solver.diag
+
+        def prior_fn(pts):
+            """Julia potential-flow prior velocity at arbitrary points (n,3).
+
+            Same blanking as the grid sweep (interior + near-surface), streamed in
+            posterior_batch chunks. Exposed in the result so adaptive sampling can
+            evaluate the prior on its own candidate points without a res^3 grid."""
+            pts = np.asarray(pts, float)
+            out = np.empty((pts.shape[0], 3), dtype=float)
+            for i in range(0, pts.shape[0], posterior_batch):
+                chunk = pts[i:i + posterior_batch]
+                out[i:i + posterior_batch] = solver.velocity(
+                    chunk, blank_interior=True, blank_near=True,
+                    near_tol=near_tol).reshape(-1, 3)
+            return out
+
+        # --- Test grid (ONLY built when grid_eval=True, i.e. for plotting) ---
+        # The res^3 grid is used purely for the plots and the (legacy) grid-based
+        # difficulty field. The force/pressure/fit pipeline never touches it, so
+        # for force-only runs we skip the whole grid: no Julia grid sweep, no
+        # res^3 posterior, no res^3 variance, no res^3 CFD interpolation. Adaptive
+        # sampling instead re-evaluates prior/posterior/variance directly on its
+        # own candidate points (see adaptive.py grid-free path).
+        if grid_eval:
+            gx = np.linspace(bounds[0, 0], bounds[0, 1], res)
+            gy = np.linspace(bounds[1, 0], bounds[1, 1], res)
+            gz = np.linspace(bounds[2, 0], bounds[2, 1], res)
+            x, y, z = np.meshgrid(gx, gy, gz, indexing="ij")
+            test_points = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
+            del x, y, z
+            print(f'testing points: {test_points.shape[0]}')
+        else:
+            test_points = None
+            print('grid_eval=False -> skipping res^3 grid (force-only / adaptive path)')
         bar()
 
         bar.text('Computing prior means (potential flow solver in Julia)...')
-        # --- Prior mean (panel solver), streamed over the grid ---
-        n_test = test_points.shape[0]
-        n_chunks = (n_test + posterior_batch - 1) // posterior_batch
+        # --- Prior mean (panel solver) on the grid: ONLY when grid_eval=True ---
+        if grid_eval:
+            n_test = test_points.shape[0]
+            n_chunks = (n_test + posterior_batch - 1) // posterior_batch
 
-        # Cache the Julia prior on the grid. 
-        # Delete prior_cache if CFD/Geometry/Tolerances change.
-        os.makedirs("prior_cache", exist_ok=True)
-        prior_file = os.path.join(
-            "prior_cache",
-            f"grid_prior_res{res}_vinf{v_inf[0]:g}_{v_inf[1]:g}_{v_inf[2]:g}.pkl",
-        )
+            # Cache the Julia prior on the grid.
+            # Delete prior_cache if CFD/Geometry/Tolerances change.
+            os.makedirs("prior_cache", exist_ok=True)
+            prior_file = os.path.join(
+                "prior_cache",
+                f"grid_prior_res{res}_vinf{v_inf[0]:g}_{v_inf[1]:g}_{v_inf[2]:g}.pkl",
+            )
 
-        if os.path.exists(prior_file):
-            with open(prior_file, "rb") as f:
-                means_tests = pickle.load(f)
-            if means_tests.shape != (n_test, 3):
-                raise RuntimeError(
-                    f"Cached prior {means_tests.shape} != expected {(n_test, 3)}. "
-                    f"Delete {prior_file} and rerun."
-                )
-            print(f"loaded cached grid prior from {prior_file} (skipping Julia)", flush=True)
-        else:
-            tolerance = True
-            if tolerance:
-                near_tol = 0.04 * solver.diag
+            if os.path.exists(prior_file):
+                with open(prior_file, "rb") as f:
+                    means_tests = pickle.load(f)
+                if means_tests.shape != (n_test, 3):
+                    raise RuntimeError(
+                        f"Cached prior {means_tests.shape} != expected {(n_test, 3)}. "
+                        f"Delete {prior_file} and rerun."
+                    )
+                print(f"loaded cached grid prior from {prior_file} (skipping Julia)", flush=True)
+            else:
                 print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
-            means_tests = np.empty((n_test, 3), dtype=float)
-            print("contains center:", solver.mesh.contains(solver.mesh.bounds.mean(axis=0).reshape(1, 3)),
-                  " is_watertight:", solver.mesh.is_watertight,
-                  "is_winding_consistent:", solver.mesh.is_winding_consistent)
-            
-            for ci, i in enumerate(range(0, n_test, posterior_batch)):
-                chunk = test_points[i:i + posterior_batch]
-                if tolerance:
-                    means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True, blank_near=True, near_tol=near_tol).reshape(-1, 3)
-                else:
-                    means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
-                if (ci % 50 == 0 or ci == n_chunks - 1):
-                    print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
-            with open(prior_file, "wb") as f:
-                pickle.dump(means_tests, f)
-            print(f"saved grid prior to {prior_file}", flush=True)
+                means_tests = np.empty((n_test, 3), dtype=float)
+                print("contains center:", solver.mesh.contains(solver.mesh.bounds.mean(axis=0).reshape(1, 3)),
+                      " is_watertight:", solver.mesh.is_watertight,
+                      "is_winding_consistent:", solver.mesh.is_winding_consistent)
 
-        
+                for ci, i in enumerate(range(0, n_test, posterior_batch)):
+                    chunk = test_points[i:i + posterior_batch]
+                    means_tests[i:i+posterior_batch] = solver.velocity(
+                        chunk, blank_interior=True, blank_near=True,
+                        near_tol=near_tol).reshape(-1, 3)
+                    if (ci % 50 == 0 or ci == n_chunks - 1):
+                        print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
+                with open(prior_file, "wb") as f:
+                    pickle.dump(means_tests, f)
+                print(f"saved grid prior to {prior_file}", flush=True)
+        else:
+            # No grid -> no grid prior. n_chunks kept only for a progress label.
+            n_test = 0
+            n_chunks = 0
+            means_tests = None
+
         means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
         if np.isnan(means_training).any():
             raise RuntimeError("NaNs in direct prior mean at training points.")
@@ -499,82 +532,99 @@ def run_gpr(
         alpha = cho_solve((c, low), jnp.asarray(residuals)) #inverted K matrix times residuals is alpha
         bar()
 
-        bar.text(f"Velocity posterior over grid ({n_chunks} chunks)...")
-        GPR_posterior = posterior_mean_batched(
-            test_points, training_coords, ell, var, alpha, means_tests,
-            batch=posterior_batch, progress_every=posterior_batch*10)
-        GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
+        if grid_eval:
+            bar.text(f"Velocity posterior over grid ({n_chunks} chunks)...")
+            GPR_posterior = posterior_mean_batched(
+                test_points, training_coords, ell, var, alpha, means_tests,
+                batch=posterior_batch, progress_every=posterior_batch*10)
+            GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
-        bar.text("Variance posterior...")
-        if compute_variance:
-            if var_res is not None and var_res < res:
-                # --- coarse variance pass + trilinear interpolation up to res^3 ---
-                # Variance is the slow term, so evaluate it on a var_res^3 grid and
-                # interpolate back onto the full res^3 grid. PLOT.py reshapes every
-                # field with the single `res`, so the returned array MUST be res^3:
-                # interpolating up keeps that contract intact.
-                cgx = np.linspace(bounds[0, 0], bounds[0, 1], var_res)
-                cgy = np.linspace(bounds[1, 0], bounds[1, 1], var_res)
-                cgz = np.linspace(bounds[2, 0], bounds[2, 1], var_res)
-                cx, cy, cz = np.meshgrid(cgx, cgy, cgz, indexing="ij")
-                coarse_pts = np.stack([cx.ravel(), cy.ravel(), cz.ravel()], axis=-1)
-                print(f"variance: coarse grid {var_res}^3 = {coarse_pts.shape[0]:,} "
-                      f"pts (vs {res**3:,} full)", flush=True)
+            bar.text("Variance posterior...")
+            if compute_variance:
+                if var_res is not None and var_res < res:
+                    # --- coarse variance pass + trilinear interpolation up to res^3 ---
+                    # Variance is the slow term, so evaluate it on a var_res^3 grid and
+                    # interpolate back onto the full res^3 grid. PLOT.py reshapes every
+                    # field with the single `res`, so the returned array MUST be res^3:
+                    # interpolating up keeps that contract intact.
+                    cgx = np.linspace(bounds[0, 0], bounds[0, 1], var_res)
+                    cgy = np.linspace(bounds[1, 0], bounds[1, 1], var_res)
+                    cgz = np.linspace(bounds[2, 0], bounds[2, 1], var_res)
+                    cx, cy, cz = np.meshgrid(cgx, cgy, cgz, indexing="ij")
+                    coarse_pts = np.stack([cx.ravel(), cy.ravel(), cz.ravel()], axis=-1)
+                    print(f"variance: coarse grid {var_res}^3 = {coarse_pts.shape[0]:,} "
+                          f"pts (vs {res**3:,} full)", flush=True)
 
-                coarse_var = posterior_vars_batched(
-                    coarse_pts, training_coords, ell, var, c, low,
-                    batch=posterior_batch, progress_every=posterior_batch*10)
-                coarse_var = np.array(coarse_var).reshape(var_res, var_res, var_res, 3)
+                    coarse_var = posterior_vars_batched(
+                        coarse_pts, training_coords, ell, var, c, low,
+                        batch=posterior_batch, progress_every=posterior_batch*10)
+                    coarse_var = np.array(coarse_var).reshape(var_res, var_res, var_res, 3)
 
-                from scipy.interpolate import RegularGridInterpolator
-                interp = RegularGridInterpolator(
-                    (cgx, cgy, cgz), coarse_var,
-                    bounds_error=False, fill_value=None)  # None -> extrapolate edges
-                GPR_variances = interp(test_points).reshape(-1, 3)
+                    from scipy.interpolate import RegularGridInterpolator
+                    interp = RegularGridInterpolator(
+                        (cgx, cgy, cgz), coarse_var,
+                        bounds_error=False, fill_value=None)  # None -> extrapolate edges
+                    GPR_variances = interp(test_points).reshape(-1, 3)
+                else:
+                    GPR_variances = posterior_vars_batched(
+                        test_points, training_coords, ell, var, c, low,
+                        batch=posterior_batch, progress_every=posterior_batch*10)
+                    GPR_variances = np.array(GPR_variances).reshape(-1, 3)
             else:
-                GPR_variances = posterior_vars_batched(
-                    test_points, training_coords, ell, var, c, low,
-                    batch=posterior_batch, progress_every=posterior_batch*10)
-                GPR_variances = np.array(GPR_variances).reshape(-1, 3)
+                GPR_variances = np.full((test_points.shape[0], 3), np.nan)
         else:
-            GPR_variances = np.full((test_points.shape[0], 3), np.nan)
+            # grid-free: no grid posterior/variance. Adaptive sampling evaluates
+            # these directly on its own candidate points.
+            GPR_posterior = None
+            GPR_variances = None
 
-        # Training reconstruction check
+        # Training reconstruction check (never touches the grid)
         K_signal = assemble_dat_shi(training_coords, training_coords, ell, var, noise_std=0.0, jitter=0.0)
         train_post = jnp.asarray(means_training) + K_signal @ alpha
         posterior_train_rmse = rmse(np.array(train_post), training_vels)
         bar()
 
-        bar.text('Interpolating truth for comparison...')
-        # --- CFD truth on test grid (velocity + pressure in one griddata pass) ---
-        
-        cfd_test = sample_dat_shi(test_points)
+        if grid_eval:
+            bar.text('Interpolating truth for comparison...')
+            # --- CFD truth on test grid (velocity + pressure in one griddata pass) ---
+            cfd_test = sample_dat_shi(test_points)
 
-        cfd_test_vels = cfd_test[:, :3]
-        cfd_p = cfd_test[:, 3]
+            cfd_test_vels = cfd_test[:, :3]
+            cfd_p = cfd_test[:, 3]
 
-        # A point is usable for velocity RMSE only if the CFD truth AND both
-        # predicted fields are finite there. Masking only the CFD truth (the old
-        # behavior) let a single NaN/Inf in the prior or posterior poison the
-        # whole metric -> post_test_rmse=nan.
-        valid_cfd = (
-            ~np.any(np.isnan(cfd_test_vels), axis=1)
-            & np.all(np.isfinite(means_tests), axis=1)
-            & np.all(np.isfinite(GPR_posterior), axis=1)
-        )
-        n_bad_pred = int((~np.all(np.isfinite(GPR_posterior), axis=1)).sum())
-        if n_bad_pred:
-            print(f"WARNING: {n_bad_pred} non-finite posterior points excluded "
-                  f"from RMSE (check var/noise bounds).", flush=True) #flags building inside
-        truth = cfd_test_vels[valid_cfd]
-        prior_test_rmse = rmse(means_tests[valid_cfd], truth)
-        post_test_rmse = rmse(GPR_posterior[valid_cfd], truth)
-        truth_test_rms = float(np.sqrt(np.mean(truth ** 2)))
+            # A point is usable for velocity RMSE only if the CFD truth AND both
+            # predicted fields are finite there. Masking only the CFD truth (the old
+            # behavior) let a single NaN/Inf in the prior or posterior poison the
+            # whole metric -> post_test_rmse=nan.
+            valid_cfd = (
+                ~np.any(np.isnan(cfd_test_vels), axis=1)
+                & np.all(np.isfinite(means_tests), axis=1)
+                & np.all(np.isfinite(GPR_posterior), axis=1)
+            )
+            n_bad_pred = int((~np.all(np.isfinite(GPR_posterior), axis=1)).sum())
+            if n_bad_pred:
+                print(f"WARNING: {n_bad_pred} non-finite posterior points excluded "
+                      f"from RMSE (check var/noise bounds).", flush=True) #flags building inside
+            truth = cfd_test_vels[valid_cfd]
+            prior_test_rmse = rmse(means_tests[valid_cfd], truth)
+            post_test_rmse = rmse(GPR_posterior[valid_cfd], truth)
+            truth_test_rms = float(np.sqrt(np.mean(truth ** 2)))
+        else:
+            # grid-free: no grid CFD comparison. These metrics are simply absent.
+            cfd_test_vels = None
+            cfd_p = None
+            valid_cfd = np.zeros(0, dtype=bool)
+            prior_test_rmse = None
+            post_test_rmse = None
+            truth_test_rms = None
 
         bar.text('Pressure GPR...')
         # --- Pressure GPR (scalar, sklearn) ---
+        # The FIT is always done (the force calc consumes p_gpr); only the grid
+        # evaluation + grid RMSE are gated behind grid_eval.
         pressure_posterior = None
         pressure_test_rmse = None
+        p_gpr = None
         if fit_pressure:
             train_p = ground_truth["pressure"].to_numpy()
             p_kernel = Matern(
@@ -587,10 +637,10 @@ def run_gpr(
             ).fit(training_coords, train_p)
             print(f"fitted kernel: {p_gpr.kernel_}", flush=True)
 
-            pressure_posterior = predict_batched(p_gpr, test_points, batch=posterior_batch)
-
-            valid_p = ~np.isnan(cfd_p)
-            pressure_test_rmse = rmse(pressure_posterior[valid_p], cfd_p[valid_p])
+            if grid_eval:
+                pressure_posterior = predict_batched(p_gpr, test_points, batch=posterior_batch)
+                valid_p = ~np.isnan(cfd_p)
+                pressure_test_rmse = rmse(pressure_posterior[valid_p], cfd_p[valid_p])
         bar()
 
         bar.text('Force Calculation...')
@@ -627,8 +677,10 @@ def run_gpr(
             "prior_test_rmse": prior_test_rmse,
             "post_test_rmse": post_test_rmse,
             "truth_test_rms": truth_test_rms,
-            "rel_prior_test_rmse": prior_test_rmse / max(truth_test_rms, 1e-12),
-            "rel_post_test_rmse": post_test_rmse / max(truth_test_rms, 1e-12),
+            "rel_prior_test_rmse": (prior_test_rmse / max(truth_test_rms, 1e-12)
+                                    if truth_test_rms is not None else None),
+            "rel_post_test_rmse": (post_test_rmse / max(truth_test_rms, 1e-12)
+                                   if truth_test_rms is not None else None),
             "valid_cfd": int(valid_cfd.sum()),
             "n_test": int(len(valid_cfd)),
             "pressure_test_rmse": pressure_test_rmse,
@@ -662,17 +714,36 @@ def run_gpr(
         "alpha": np.asarray(alpha, dtype=float),
         "sample_dat_shi": sample_dat_shi,   # live CFD sampler closure
         "stl_mesh": stl_mesh,               # for mesh-reject of proposed points
+        "posterior_batch": posterior_batch,
+        "grid_eval": grid_eval,
     }
 
-    # Shut down THIS run's Julia panel server now, rather than waiting for the
-    # atexit hook. Each run_gpr starts a fresh FLOWPanelSolver -> a fresh Julia
-    # process; if they're only closed at program exit they accumulate across
-    # phases/configs and exhaust memory. mesh_vertices is already a numpy copy,
-    # so nothing in the returned dict needs the live solver.
-    try:
-        solver.close()
-    except Exception:
-        pass
+    if not grid_eval:
+        # Grid-free: adaptive sampling must re-evaluate the Julia prior on its own
+        # candidate points, which needs the panel solver ALIVE. Expose the prior
+        # closure + the trained Cholesky factors and DEFER closing the solver to
+        # propose_adaptive_points (which calls result["_close_solver"]() when done).
+        # main.py runs phases sequentially and proposes immediately after each
+        # run_gpr, so at most one solver is alive at a time - no accumulation.
+        _result["_prior_fn"] = prior_fn
+        _result["_chol_c"] = c
+        _result["_chol_low"] = low
+
+        def _close_solver(_s=solver):
+            try:
+                _s.close()
+            except Exception:
+                pass
+        _result["_close_solver"] = _close_solver
+    else:
+        # Grid path already has everything it needs as numpy copies; shut the
+        # Julia panel server down now rather than waiting for the atexit hook.
+        # Each run_gpr starts a fresh FLOWPanelSolver -> a fresh Julia process; if
+        # only closed at exit they accumulate across phases and exhaust memory.
+        try:
+            solver.close()
+        except Exception:
+            pass
 
     return _result
 

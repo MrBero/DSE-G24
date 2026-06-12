@@ -203,6 +203,163 @@ def _score_interp(result, cfg):
 
 
 # =============================================================================
+# PART 1a' - GRID-FREE difficulty score, evaluated directly on candidate points
+#
+# Instead of building a res^3 grid, np.gradient-ing it, and interpolating, we
+# evaluate the SAME quantities (grad|u|, curl u, variance) directly on the
+# candidate points using the trained GP. For each point we need the velocity at
+# the point and at 6 neighbours (+-dx, +-dy, +-dz) so central differences give
+# the spatial derivatives. The velocity used is the POSTERIOR = Julia prior +
+# K(x*,X_train) @ alpha (exactly what posterior_mean_batched returns), i.e. the
+# prior corrected by the GP - identical to what the grid path differentiated.
+# Variance reuses the trained Cholesky factors (no retraining).
+# =============================================================================
+
+def _fd_steps(ell, fd_step):
+    """Per-axis finite-difference step.
+
+    fd_step is None  -> auto: 0.15 * ell per axis, clamped to [0.5, 3.0] m.
+    fd_step a scalar -> that fixed step on every axis.
+    fd_step a length-3 -> used per axis as given.
+    The auto rule ties the step to the GP correlation length (the field is a sum
+    of Matern-5/2 kernels of width ell): small enough vs ell to approximate the
+    true gradient, large enough not to amplify the GP noise floor.
+    """
+    ell = np.asarray(ell, float).reshape(-1)
+    if fd_step is None:
+        h = np.clip(0.1 * ell, 0.5, 10.0)
+    elif np.isscalar(fd_step):
+        h = np.full(3, float(fd_step))
+    else:
+        h = np.asarray(fd_step, float).reshape(-1)
+        if h.size == 1:
+            h = np.full(3, float(h))
+    return h[:3]
+
+
+def _posterior_vel_on_points(points, prior_fn, training_coords, ell, var, alpha,
+                             posterior_batch):
+    """GP posterior velocity on arbitrary points: prior_fn(points) + K@alpha.
+
+    Mirrors GPR.posterior_mean_batched but takes the prior closure so the prior
+    and the GP correction are evaluated together here. Returns (n,3)."""
+    from GPR import posterior_mean_batched
+    prior = np.asarray(prior_fn(points), float).reshape(-1, 3)
+    post = posterior_mean_batched(
+        points, training_coords, ell, var, alpha, prior,
+        batch=posterior_batch, progress_every=0)
+    return np.asarray(post, float).reshape(-1, 3)
+
+
+def _eval_score_inputs_on_points(points, prior_fn, training_coords, ell, var,
+                                 alpha, c, low, fd_step=None, posterior_batch=2000,
+                                 compute_var=True):
+    """Evaluate grad|u|, curl u (from the GP posterior) and |variance| at `points`.
+
+    Uses central differences with the 6 neighbours of each point. Returns a dict
+    with arrays of shape (n,): 'grad_mag', 'vort_mag', 'var_mag'. These are the
+    raw (un-normalised) score ingredients; normalisation/blending happens in the
+    caller so it matches the grid path's _difficulty_field exactly.
+    """
+    from GPR import posterior_vars_batched
+
+    points = np.asarray(points, float)
+    n = points.shape[0]
+    h = _fd_steps(ell, fd_step)
+
+    # Build the stencil: center + 6 neighbours, stacked so we do ONE batched
+    # posterior evaluation over all 7n points (cheap relative to a res^3 grid).
+    offsets = np.array([
+        [0.0, 0.0, 0.0],
+        [+h[0], 0.0, 0.0], [-h[0], 0.0, 0.0],
+        [0.0, +h[1], 0.0], [0.0, -h[1], 0.0],
+        [0.0, 0.0, +h[2]], [0.0, 0.0, -h[2]],
+    ])
+    stencil = (points[:, None, :] + offsets[None, :, :]).reshape(-1, 3)  # (7n,3)
+
+    vel = _posterior_vel_on_points(stencil, prior_fn, training_coords, ell, var,
+                                   alpha, posterior_batch).reshape(n, 7, 3)
+
+    # central differences: d/dx ~ (v[+x]-v[-x]) / (2 hx), etc.
+    dudx = (vel[:, 1, :] - vel[:, 2, :]) / (2.0 * h[0])   # (n,3)
+    dudy = (vel[:, 3, :] - vel[:, 4, :]) / (2.0 * h[1])
+    dudz = (vel[:, 5, :] - vel[:, 6, :]) / (2.0 * h[2])
+
+    # gradient of speed |u| at the centre (chain rule: grad|u| = (J^T u)/|u|)
+    u0 = vel[:, 0, :]                                     # (n,3)
+    speed = np.linalg.norm(u0, axis=1)
+    safe = np.maximum(speed, 1e-12)
+    grad_speed = np.column_stack([
+        (dudx * u0).sum(axis=1),
+        (dudy * u0).sum(axis=1),
+        (dudz * u0).sum(axis=1),
+    ]) / safe[:, None]
+    grad_mag = np.linalg.norm(grad_speed, axis=1)
+
+    # curl u = (dw/dy - dv/dz, du/dz - dw/dx, dv/dx - du/dy)
+    wx = dudy[:, 2] - dudz[:, 1]
+    wy = dudz[:, 0] - dudx[:, 2]
+    wz = dudx[:, 1] - dudy[:, 0]
+    vort_mag = np.sqrt(wx ** 2 + wy ** 2 + wz ** 2)
+
+    if compute_var:
+        v = posterior_vars_batched(points, training_coords, ell, var, c, low,
+                                   batch=posterior_batch, progress_every=0)
+        var_mag = np.linalg.norm(np.asarray(v, float).reshape(-1, 3), axis=1)
+    else:
+        var_mag = np.zeros(n)
+
+    return {"grad_mag": grad_mag, "vort_mag": vort_mag, "var_mag": var_mag}
+
+
+def build_pool_and_score_inputs(cylinder_geom, stl_mesh, prior_fn,
+                                training_coords, ell, var, alpha, c, low,
+                                adaptive_config=None, pool_seed=None,
+                                fd_step=None, posterior_batch=2000):
+    """Build the shell LHS candidate pool and evaluate its grid-free score inputs.
+
+    Called from run_gpr's grid-free branch WHILE the panel solver is still alive
+    (prior_fn needs it). Returns a picklable bundle that propose_adaptive_points
+    consumes directly, so no res^3 grid is ever built and the solver can close
+    immediately afterwards.
+
+    The bundle stores the mesh-rejected pool coordinates plus the raw per-point
+    grad/vort/var ingredients; the caller (propose_adaptive_points) normalises,
+    blends with the w_* weights, resamples and spaces them - identical downstream
+    logic to the grid path, just with point-wise instead of interpolated scores.
+    """
+    cfg = dict(ADAPTIVE_DEFAULTS)
+    if adaptive_config:
+        cfg.update(adaptive_config)
+    if pool_seed is None:
+        pool_seed = cfg.get("pool_seed", cfg["seed"])
+
+    fr = _cyl_frame({"cylinder_geom": cylinder_geom})
+
+    # candidate pool over the thick tilted shell (pool_size is a variable)
+    pool = _shell_lhs_pool(fr, cfg, cfg["pool_size"], pool_seed)
+    keep = _mesh_reject_mask(pool, stl_mesh, epsilon=cfg["epsilon"],
+                             use_signed_distance=True)
+    pool = pool[keep]
+    if len(pool) == 0:
+        raise RuntimeError("LHS candidate pool empty after mesh rejection.")
+
+    inputs = _eval_score_inputs_on_points(
+        pool, prior_fn, training_coords, ell, var, alpha, c, low,
+        fd_step=fd_step, posterior_batch=posterior_batch, compute_var=True)
+
+    return {
+        "pool": pool,
+        "grad_mag": inputs["grad_mag"],
+        "vort_mag": inputs["vort_mag"],
+        "var_mag": inputs["var_mag"],
+        "pool_seed": pool_seed,
+        "fd_step": fd_step,                       # raw config value (may be None)
+        "fd_step_resolved": _fd_steps(ell, fd_step),  # actual per-axis steps used [m]
+    }
+
+
+# =============================================================================
 # PART 1b - weighted Latin-hypercube candidate pool (reuses cylinder shell)
 # =============================================================================
 
@@ -365,21 +522,69 @@ def propose_adaptive_points(result, previous_coords=None, adaptive_config=None,
         rh = rh * scale
         rv = rv * scale     # keep the 4.2/1.2 anisotropy ratio while spreading
 
-    # ---- PART 1: difficulty field (grid, np.gradient) + score interpolator ----
-    score_fn = _score_interp(result, cfg)
+    # ---- PART 1+1b: candidate pool + per-candidate difficulty score ----
+    # Three paths, same downstream logic:
+    #   (A) precomputed grid-free bundle in result["adaptive_pool_bundle"].
+    #   (B) live grid-free: result exposes _prior_fn + Cholesky factors (run_gpr
+    #       ran with grid_eval=False). Build the pool here with THIS phase's cfg,
+    #       evaluate grad/vort/var directly on each candidate (+6 neighbours), then
+    #       close the (still-alive) panel solver. No res^3 grid is ever built.
+    #   (C) legacy grid: differentiate the res^3 posterior and interpolate the
+    #       score onto a freshly drawn pool (run_gpr ran with grid_eval=True).
+    bundle = result.get("adaptive_pool_bundle")
+    if bundle is None and result.get("_prior_fn") is not None:
+        bundle = build_pool_and_score_inputs(
+            result.get("cylinder_geom"), result["stl_mesh"], result["_prior_fn"],
+            result["training_coords"], result["ell"], result["var"],
+            result["alpha"], result["_chol_c"], result["_chol_low"],
+            adaptive_config=cfg, pool_seed=pool_seed,
+            fd_step=cfg.get("fd_step"),
+            posterior_batch=result.get("posterior_batch", 2000))
+        # done with the panel solver for this phase - release the Julia process
+        closer = result.get("_close_solver")
+        if closer is not None:
+            closer()
+            result["_prior_fn"] = None
+            result["_close_solver"] = None
 
-    # ---- PART 1b: weighted-LHS candidate pool over the thick shell ----
-    pool = _shell_lhs_pool(fr, cfg, cfg["pool_size"], pool_seed)
-    # mesh-reject the pool up front
-    keep = _mesh_reject_mask(pool, result["stl_mesh"], epsilon=cfg["epsilon"],
-                             use_signed_distance=True)
-    pool = pool[keep]
-    if len(pool) == 0:
-        raise RuntimeError("LHS candidate pool empty after mesh rejection.")
-    if verbose:
-        print(f"[adaptive] pool_seed={pool_seed}  pool[0]={pool[0].round(2)}")
-    pool_score = score_fn(pool)
-    # Points near/inside the building can interpolate a non-finite posterior
+    if bundle is not None:
+        pool = np.asarray(bundle["pool"], float)
+        # Always surface the ACTUAL per-axis finite-difference steps used (the
+        # resolved values, not the raw config which is None under the auto rule),
+        # since this is the main thing to tune. Printed even when verbose=False.
+        _fdr = bundle.get("fd_step_resolved")
+        _fdr_s = (np.array2string(np.asarray(_fdr, float), precision=3)
+                  if _fdr is not None else "n/a")
+        print(f"[adaptive] grid-free fd step (dx,dy,dz)={_fdr_s} m "
+              f"(config fd_step={bundle.get('fd_step')})", flush=True)
+        if verbose:
+            print(f"[adaptive] grid-free: pool {len(pool)} pts, "
+                  f"pool_seed={bundle.get('pool_seed')}")
+        g = _normalize(bundle["grad_mag"])
+        w = _normalize(bundle["vort_mag"])
+        v = _normalize(bundle["var_mag"])
+        pool_score = cfg["w_grad"] * g + cfg["w_vort"] * w + cfg["w_var"] * v
+    else:
+        # ---- legacy difficulty field (grid, np.gradient) + score interpolator ----
+        if result.get("GPR_posterior") is None or result.get("res") is None:
+            raise RuntimeError(
+                "propose_adaptive_points: no scoring data available. The result has "
+                "neither grid-free ingredients (_prior_fn / Cholesky factors, from a "
+                "grid_eval=False run) nor a res^3 grid (GPR_posterior, from a "
+                "grid_eval=True run). A grid-free result can only be proposed from "
+                "ONCE - re-run run_gpr before proposing again.")
+        score_fn = _score_interp(result, cfg)
+        pool = _shell_lhs_pool(fr, cfg, cfg["pool_size"], pool_seed)
+        keep = _mesh_reject_mask(pool, result["stl_mesh"], epsilon=cfg["epsilon"],
+                                 use_signed_distance=True)
+        pool = pool[keep]
+        if len(pool) == 0:
+            raise RuntimeError("LHS candidate pool empty after mesh rejection.")
+        if verbose:
+            print(f"[adaptive] pool_seed={pool_seed}  pool[0]={pool[0].round(2)}")
+        pool_score = score_fn(pool)
+
+    # Points near/inside the building can produce a non-finite posterior/score
     # (the panel prior blanks the interior -> NaN). Treat non-finite difficulty
     # as zero weight so the importance-resample probabilities stay finite; the
     # point can still be chosen to fill a band, just not preferentially. Without

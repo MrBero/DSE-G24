@@ -17,6 +17,7 @@ COMMON = dict(
     posterior_batch=100,
     compute_variance=True,
     var_res=50,
+    grid_eval=False,
 )
 
 # initial sampling: tilted cylinder (gives us cylinder_geom for the adaptive regions)
@@ -52,7 +53,8 @@ ADAPTIVE_CFG = dict(
     n_new=100, frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
     # spacing: hard drone limit + optional spread relaxation
     excl_horizontal=1.2, excl_vertical=4.2,
-    spread_radius=None   # set e.g. 6.0 to relax points ~6 m apart laterally
+    spread_radius=None,   # set e.g. 6.0 to relax points ~6 m apart laterally
+    fd_step=[1.0,1.0,1.0]
 )
 
 # Optional PER-PHASE overrides of ADAPTIVE_CFG. Map phase number (1-based, the
@@ -174,7 +176,10 @@ def main():
     # the accumulating set of all flown points (cylinder + every adaptive batch)
     accumulated = np.asarray(result["training_coords"], float)
 
-    save_all(result, out_dir="plots", phase_label="phase0", z_slice_target=25, show=False, true_force=TRUE_FORCE)
+    # Plotting needs the res^3 grid fields, which only exist when grid_eval=True.
+    PLOTS = bool(COMMON.get("grid_eval", False))
+    if PLOTS:
+        save_all(result, out_dir="plots", phase_label="phase0", z_slice_target=25, show=False, true_force=TRUE_FORCE)
     _print_rmse(0, result)
     results = [result]
     force_curve = [(len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec"))]
@@ -187,8 +192,13 @@ def main():
         We only ever use results[-1] downstream, so freeing the rest is safe."""
         if res is None:
             return
+        # close a still-open grid-free panel solver (last phase never proposes again)
+        closer = res.get("_close_solver")
+        if closer is not None:
+            closer()
         for k in ("sample_dat_shi", "test_points", "GPR_posterior", "GPR_variances",
-                  "means_tests", "cfd_test_vels", "pressure_posterior", "momentum"):
+                  "means_tests", "cfd_test_vels", "pressure_posterior", "momentum",
+                  "_prior_fn", "_close_solver", "_chol_c", "_chol_low"):
             res.pop(k, None)
 
     # ---------- adaptive phases ----------
@@ -220,7 +230,8 @@ def main():
             cylinder_geom_override=cylinder_geom,  # shell/face RMSE + momentum force here too
         )
         result["cylinder_geom"] = cylinder_geom   # keep geometry available downstream
-        save_all(result, out_dir="plots", phase_label=f"phase{phase}", z_slice_target=25, show=False, true_force=TRUE_FORCE)
+        if PLOTS:
+            save_all(result, out_dir="plots", phase_label=f"phase{phase}", z_slice_target=25, show=False, true_force=TRUE_FORCE)
         results.append(result)
         _print_rmse(phase, result)
         force_curve.append((len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec")))
@@ -240,8 +251,9 @@ def main():
                 **COMMON, sample_method="array", samples=accumulated,
                 cylinder_geom_override=cylinder_geom)
             result["cylinder_geom"] = cylinder_geom
-            save_all(result, out_dir="plots", phase_label="phase_topcap",
-                     z_slice_target=25, show=False, true_force=TRUE_FORCE)
+            if PLOTS:
+                save_all(result, out_dir="plots", phase_label="phase_topcap",
+                         z_slice_target=25, show=False, true_force=TRUE_FORCE)
             results.append(result)
             _print_rmse("top-cap", result)
             force_curve.append((len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec")))
@@ -278,8 +290,9 @@ def main():
     # per-component force-convergence plot (annotated with drone counts)
     plot_force_convergence(force_curve, true_force=TRUE_FORCE, out_dir="plots")
 
-    # ---------- plot the final phase ----------
-    plot_all(results[-1], z_slice_target=25, show=True)
+    # ---------- plot the final phase (only if the grid was evaluated) ----------
+    if PLOTS:
+        plot_all(results[-1], z_slice_target=25, show=True)
     return results
 
 

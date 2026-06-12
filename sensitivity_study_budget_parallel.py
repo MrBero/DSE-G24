@@ -38,6 +38,7 @@ COMMON = dict(
     posterior_batch=100,
     compute_variance=True,
     var_res=50,
+    grid_eval=False,
 )
 
 TRUE_FORCE = np.array([155433.0, 208647.0, 72586.0])
@@ -45,7 +46,7 @@ TRUE_FORCE = np.array([155433.0, 208647.0, 72586.0])
 PLOT_DIR = "plots_budget"
 SEEDS = [7, 42, 67, 420, 1234, 15, 4321, 1324, 4213, 3, 696, 6767]         # 5 seeds per config -> 25 runs total
 BAND = 0.05                          # +-5% acceptance band drawn on plots
-MAX_WORKERS = 5                      # parallel processes; start 2-3, raise cautiously
+MAX_WORKERS = 6                      # parallel processes; start 2-3, raise cautiously
 
 # Budget allocations: (label, n_per_phase, n_phases). total ~= n_per_phase*n_phases
 # (phase 0 included). phase 0 = initial cylinder of n_per_phase, then
@@ -73,6 +74,7 @@ BASE_ADAPTIVE = dict(
     # spacing: hard drone limit + optional spread relaxation
     excl_horizontal=1.2, excl_vertical=4.2,
     spread_radius=None,   # set e.g. 6.0 to relax points ~6 m apart laterally
+    fd_step=[1.0,1.0,1.0]
 )
 
 # Base initial cylinder (matches the main study). n_points/top_cap_frac set per
@@ -111,8 +113,12 @@ def _cfg(n_per_phase, seed):
 def _free_heavy(res):
     if res is None:
         return
+    closer = res.get("_close_solver")
+    if closer is not None:
+        closer()
     for k in ("sample_dat_shi", "test_points", "GPR_posterior", "GPR_variances",
-              "means_tests", "cfd_test_vels", "pressure_posterior", "momentum"):
+              "means_tests", "cfd_test_vels", "pressure_posterior", "momentum",
+              "_prior_fn", "_close_solver", "_chol_c", "_chol_low"):
         res.pop(k, None)
  
  
