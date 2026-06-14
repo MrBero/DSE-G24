@@ -1,6 +1,7 @@
 from GPR import run_gpr
 from PLOT import (plot_all, save_all, plot_force_convergence,
-                  triptych_field_vlim, multi_slice_vlim, pressure_triptych_vlim)
+                  triptych_field_vlim, multi_slice_vlim, pressure_triptych_vlim,
+                  plot_variance_across_phases)
 from adaptive import propose_adaptive_points, propose_top_cap_points
 import numpy as np
 
@@ -58,16 +59,6 @@ ADAPTIVE_CFG = dict(
     fd_step=[1.0,1.0,1.0]
 )
 
-# Optional PER-PHASE overrides of ADAPTIVE_CFG. Map phase number (1-based, the
-# adaptive phases) -> dict of keys to override for that phase only. Anything not
-# listed falls back to ADAPTIVE_CFG. Leave empty to use ADAPTIVE_CFG everywhere.
-# Example:
-#   ADAPTIVE_CFG_PER_PHASE = {
-#       1: dict(front_frac=None, shell_thick_in=0.30, shell_thick_out=0.15),
-#       2: dict(w_vort=0.6, w_grad=0.3, w_var=0.1),
-#       3: dict(frac_region1=0.5, frac_region2=0.25, frac_region3=0.25),
-#   }
-#Doesnt really help...
 ADAPTIVE_CFG_PER_PHASE = {
     # 1: dict(w_grad=0.35, w_vort=0.35, w_var=0.3),
     # 2: dict(w_grad=0.4, w_vort=0.4, w_var=0.2),
@@ -123,14 +114,8 @@ def _print_rmse(phase, result):
 
 def count_front_back(accumulated, stl_mesh, v_inf, stl_scale=1.0):
     """Count accumulated drones upstream vs downstream of the building center,
-    split by the plane through the center normal to the horizontal flow.
+    split by the plane through the center normal to the horizontal flow."""
 
-    'front'  = downstream side (same direction the wind blows, +s)
-    'behind' = upstream side (into the wind, -s)
-    Uses the same horizontal centroid P0 and streamwise unit vector s as the
-    cylinder sampler, so the dividing plane matches the cylinder's center.
-    """
-    
     V = np.asarray(stl_mesh.vertices) * stl_scale   # match coords to training pts
 
     print(f"    [debug] V x-range: {V[:,0].min():.3g}..{V[:,0].max():.3g}  "
@@ -160,6 +145,22 @@ def count_front_back(accumulated, stl_mesh, v_inf, stl_scale=1.0):
         print(f"    on dividing plane  : {n_on}")
     return n_front, n_back
 
+
+def _variance_snapshot(result, cylinder_geom):
+    """Light copy of just what plot_variance_across_phases needs from a phase,
+    taken BEFORE _free_heavy strips the grid arrays. Keeps the full res^3
+    variance + test grid (a few hundred MB total across phases at res=100, far
+    smaller than the CFD interpolator that _free_heavy actually guards), so the
+    cross-phase variance figure can be built after the loop."""
+    return dict(
+        res=result["res"],
+        bounds=np.asarray(result["bounds"]),
+        test_points=np.asarray(result["test_points"]),
+        GPR_variances=np.asarray(result["GPR_variances"]),
+        cylinder_geom=cylinder_geom,
+    )
+
+
 def main():
     # ---------- phase 0: initial cylinder run ----------
     print("\n=== PHASE 0 (initial cylinder sampling) ===")
@@ -181,29 +182,29 @@ def main():
     PLOTS = bool(COMMON.get("grid_eval", False))
     if PLOTS:
         FIELD_VLIM, DIFF_VLIM = triptych_field_vlim(result, z_slice_target=25)
-        VAR_VLIM = multi_slice_vlim(result, field="variances")
+        # VAR_VLIM = multi_slice_vlim(result, field="variances")
+        VAR_VLIM = (0.0, 7.0)
         PRESS_VLIM, PRESS_DIFF_VLIM = pressure_triptych_vlim(result, z_slice_target=25)
-        PRESS_DIFF_VLIM = None
+        PRESS_DIFF_VLIM = (-30.0, 30.0)
     else:
         FIELD_VLIM = DIFF_VLIM = VAR_VLIM = PRESS_VLIM = PRESS_DIFF_VLIM = None
+
+    # light per-phase variance snapshots for the cross-phase variance figure
+    variance_snaps = []
     if PLOTS:
         save_all(result, out_dir="plots", phase_label="phase0", z_slice_target=25,
                  show=False, true_force=TRUE_FORCE,
                  field_vlim=FIELD_VLIM, diff_vlim=DIFF_VLIM, var_vlim=VAR_VLIM,
                  press_vlim=PRESS_VLIM, press_diff_vlim=PRESS_DIFF_VLIM)
+        variance_snaps.append(_variance_snapshot(result, cylinder_geom))
     _print_rmse(0, result)
     results = [result]
     force_curve = [(len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec"))]
 
     def _free_heavy(res):
-        """Drop the big arrays + the CFD sampler closure from an old phase result.
-        Each run_gpr rebuilds the 21M-point CFD interpolator; if old results keep
-        their sample_dat_shi closure alive, those interpolators never get freed and
-        memory grows every phase until a fresh build runs out (the phase-3 crash).
-        We only ever use results[-1] downstream, so freeing the rest is safe."""
+        """Drop the big arrays + the CFD sampler closure from an old phase result."""
         if res is None:
             return
-        # close a still-open grid-free panel solver (last phase never proposes again)
         closer = res.get("_close_solver")
         if closer is not None:
             closer()
@@ -243,6 +244,8 @@ def main():
         result["cylinder_geom"] = cylinder_geom   # keep geometry available downstream
         if PLOTS:
             save_all(result, out_dir="plots", phase_label=f"phase{phase}", z_slice_target=25, show=False, true_force=TRUE_FORCE, field_vlim=FIELD_VLIM, diff_vlim=DIFF_VLIM, var_vlim=VAR_VLIM, press_vlim=PRESS_VLIM, press_diff_vlim=PRESS_DIFF_VLIM)
+            # snapshot this phase's variance slice BEFORE it is freed next iteration
+            variance_snaps.append(_variance_snapshot(result, cylinder_geom))
         results.append(result)
         _print_rmse(phase, result)
         force_curve.append((len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec")))
@@ -297,11 +300,19 @@ def main():
             row += (f"  {_relc(err[0], tf[0]):8.4g}  {_relc(err[1], tf[1]):8.4g}  "
                     f"{_relc(err[2], tf[2]):8.4g}  {relF:8.4g}")
         print(row)
-    
+
     count_front_back(accumulated, results[-1]["stl_mesh"],
                      COMMON["v_inf"], stl_scale=1.0)
     # per-component force-convergence plot (annotated with drone counts)
     plot_force_convergence(force_curve, true_force=TRUE_FORCE, out_dir="plots")
+
+    # ---------- cross-phase variance comparison (one row, shared scale) ----------
+    if PLOTS and len(variance_snaps) > 1:
+        fig = plot_variance_across_phases(variance_snaps, z_slice_target=25,
+                                          vlim=VAR_VLIM)
+        fig.savefig("plots/variance_across_phases.png",
+                    facecolor=fig.get_facecolor(), dpi=200)
+        print("saved cross-phase variance figure -> plots/variance_across_phases.png")
 
     # ---------- plot the final phase (only if the grid was evaluated) ----------
     if PLOTS:

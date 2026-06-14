@@ -195,6 +195,76 @@ def triptych_field_vlim(results, z_slice_target=2.5, component=None):
     return field_vlim, diff_vlim
 
 
+def plot_variance_across_phases(results, z_slice_target=2.5, vlim=None,
+                                phase_labels=None, show_cylinder=True):
+    """One row of variance |u| slices at a fixed z, one panel per phase, all on
+    a single shared colorbar so the phases are directly comparable.
+
+    results:        list of per-phase result dicts (each needs the res^3
+                    GPR_variances, i.e. a grid_eval run).
+    z_slice_target: target z (m); nearest grid plane is used.
+    vlim:           shared (vmin, vmax). None -> spans the variance of every
+                    phase at this slice (auto shared scale).
+    phase_labels:   optional list of titles; defaults to "Phase 0", "Phase 1"...
+    show_cylinder:  overlay the integration ring on each panel.
+
+    Note: absolute variance is not strictly comparable across phases because the
+    kernel is refit each phase (shorter length scales in later phases raise the
+    variance away from samples). The shared scale makes the SPATIAL pattern
+    comparable; read it as a coverage diagnostic, not a convergence metric.
+    """
+    if isinstance(results, dict):
+        results = [results]
+    n = len(results)
+    if phase_labels is None:
+        phase_labels = [f"Phase {i}" for i in range(n)]
+
+    # gather each phase's variance magnitude at the slice
+    slices, Xs_list, Ys_list, z_used = [], [], [], None
+    for result in results:
+        res = result["res"]
+        bounds = np.asarray(result["bounds"])
+        P = np.asarray(result["test_points"]).reshape(res, res, res, 3)
+        V = np.asarray(result["GPR_variances"]).reshape(res, res, res, 3)
+        z_grid = np.linspace(bounds[2, 0], bounds[2, 1], res)
+        k = _slice_index(z_grid, z_slice_target)
+        z_used = z_grid[k]
+        slices.append(_velocity_magnitude(V[:, :, k, :]))
+        Xs_list.append(P[:, :, k, 0])
+        Ys_list.append(P[:, :, k, 1])
+
+    # shared scale across all phases at this slice
+    if vlim is not None:
+        vmin, vmax = float(vlim[0]), float(vlim[1])
+    else:
+        vmin = float(min(np.nanmin(s) for s in slices))
+        vmax = float(max(np.nanmax(s) for s in slices))
+    levels = _safe_levels(vmin, vmax)
+
+    fig, axs = plt.subplots(1, n, figsize=(3.4 * n + 1.2, 4.4),
+                            constrained_layout=True)
+    if n == 1:
+        axs = [axs]
+
+    pc = None
+    for ax, field, Xs, Ys, label, result in zip(
+            axs, slices, Xs_list, Ys_list, phase_labels, results):
+        pc = _safe_contourf(ax, Xs, Ys, field, levels=levels,
+                            cmap="Reds", extend="max")
+        if show_cylinder:
+            _draw_ring(ax, _cylinder_ring_at_z(result, z_used))
+        ax.set_aspect("equal")
+        ax.set_title(label)
+        ax.set_xlabel("x")
+        if ax is axs[0]:
+            ax.set_ylabel("y")
+
+    fig.colorbar(pc, ax=axs, fraction=0.025, pad=0.01,
+                 label=r"$\hat{\sigma}\,|u|$")
+    fig.suptitle(f"Posterior variance across phases, z={z_used:.4g}")
+    return fig
+
+
 def multi_slice_vlim(results, field="variances", axis="z", slice_range=None):
     """Common (vmin, vmax) for plot_multi_slices across several results, so the
     same field (e.g. "variances") shares one colour scale across phases.
@@ -218,8 +288,31 @@ def multi_slice_vlim(results, field="variances", axis="z", slice_range=None):
     return (lo, hi)
 
 
+def _cylinder_ring_at_z(result, z_here):
+    """(cx, cy, R) of the tilted cylinder where it cuts plane z=z_here, or None.
+    The cylinder leans downstream with height, so the ring centre interpolates
+    linearly from bottom_center to top_center while R is constant."""
+    cg = result.get("cylinder_geom")
+    if cg is None or cg.get("R") is None:
+        return None
+    bc = np.asarray(cg["bottom_center"], float)
+    tc = np.asarray(cg["top_center"], float)
+    dz = tc[2] - bc[2]
+    frac = (z_here - bc[2]) / dz if abs(dz) > 1e-9 else 0.0
+    cx = bc[0] + frac * (tc[0] - bc[0])
+    cy = bc[1] + frac * (tc[1] - bc[1])
+    return (cx, cy, float(cg["R"]))
+
+
+def _draw_ring(ax, ring):
+    """Overlay the cylinder integration ring (dashed white) on an axis."""
+    if ring is not None:
+        ax.add_patch(plt.Circle((ring[0], ring[1]), ring[2], fill=False,
+                                edgecolor="white", linestyle="--", linewidth=1.4))
+
+
 def plot_slice_triptych(result, z_slice_target=2.5, component=None,
-                        field_vlim=None, diff_vlim=None):
+                        field_vlim=None, diff_vlim=None, show_cylinder=True):
     """1x3 panel: CFD / posterior / (posterior - CFD) |u| at a z-slice.
 
     A trimmed sibling of plot_slice_comparison (prior field dropped) for the
@@ -296,11 +389,17 @@ def plot_slice_triptych(result, z_slice_target=2.5, component=None,
         (axs[2], diff, f"Posterior - CFD {clab}", "coolwarm", diff_levels),
     ]
 
+    # Cylinder integration surface at this slice (where low error matters for
+    # the force). The tilted cylinder leans downstream with height.
+    ring = _cylinder_ring_at_z(result, z_here) if show_cylinder else None
+
     for ax, field, title, cmap, levels in plot_items:
         pc = _safe_contourf(ax, Xs, Ys, field, levels=levels, cmap=cmap, extend="both")
         fig.colorbar(pc, ax=ax)
         if near_slice.any():
             ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
+        if ax is axs[2]:                      # ring only on the difference panel
+            _draw_ring(ax, ring)
         ax.set_aspect("equal")
         ax.set_title(f"{title}, z={z_here:.4g}")
         ax.set_xlabel("x")
@@ -421,7 +520,7 @@ def plot_pressure_slice(result, z_slice_target=2.5):
 
 
 def plot_pressure_triptych(result, z_slice_target=2.5, field_vlim=None,
-                           diff_vlim=None):
+                           diff_vlim=None, show_cylinder=True):
     """1x3 panel: CFD / posterior / (posterior - CFD) pressure at a z-slice.
 
     The pressure analogue of plot_slice_triptych. Needs both the posterior
@@ -487,11 +586,15 @@ def plot_pressure_triptych(result, z_slice_target=2.5, field_vlim=None,
         (axs[2], diff, "Posterior - CFD p", "coolwarm", diff_levels),
     ]
 
+    ring = _cylinder_ring_at_z(result, z_here) if show_cylinder else None
+
     for ax, field, title, cmap, levels in plot_items:
         pc = _safe_contourf(ax, Xs, Ys, field, levels=levels, cmap=cmap, extend="both")
         fig.colorbar(pc, ax=ax)
         if near_slice.any():
             ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
+        if ax is axs[2]:                      # ring only on the difference panel
+            _draw_ring(ax, ring)
         ax.set_aspect("equal")
         ax.set_title(f"{title}, z={z_here:.4g}")
         ax.set_xlabel("x")

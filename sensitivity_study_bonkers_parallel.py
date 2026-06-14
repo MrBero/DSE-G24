@@ -1,30 +1,3 @@
-"""
-sensitivity_study_multi_parallel.py
-===================================
-
-Combines the two existing studies:
-
-  * sensitivity_study.py        -> arbitrary NAMED configs, each a few overrides
-                                   of the initial sampling and/or adaptive config
-                                   (w_*, shell, front_frac, fd_step, n_new, ...).
-  * sensitivity_study_budget_parallel.py
-                                -> runs many SEEDS per config in parallel and
-                                   aggregates mean +- 1 std PER PHASE STEP.
-
-So: define any configs you like (like sensitivity_study.py), and each is run
-over many seeds with mean/std bands (like the budget study). Each config also
-carries its own DRONES_PER_PHASE (n_per_phase) and N_PHASES, so you can mix a
-weight sweep with a budget sweep in one run.
-
-It REUSES the aggregation + plotting helpers from
-sensitivity_study_budget_parallel.py (imported), so those live in one place.
-
-Prerequisite - WARM CACHE (same as the budget study):
-  Grid-free runs only READ the momentum-prior cache (keyed by geometry/v_inf,
-  NOT by seed). RUN ONCE WITH 1 PROCESS / MAX_WORKERS=1 first (or a single main.py
-  with the same base geometry) so the momentum cache exists; afterwards every
-  worker only reads it - concurrent reads are safe.
-"""
 
 import os
 import gc
@@ -35,31 +8,59 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from GPR import run_gpr
 from adaptive import propose_adaptive_points
 
-# Reuse the budget study's COMMON, TRUE_FORCE and ALL aggregation/plotting
-# helpers verbatim so there is a single source of truth for them.
-import sensitivity_study_budget_parallel as B
-from sensitivity_study_budget_parallel import (
-    COMMON, TRUE_FORCE, BAND,
-    _component, _relerr, _inplane_relerr,
-    _aggregate, _band_plot, _save, _make_per_config_figs,
+
+# ---------------------------------------------------------------------------
+# Shared run settings (identical to the other studies so only sampling changes)
+# ---------------------------------------------------------------------------
+COMMON = dict(
+    stl_filepath="input_stls/Aerospecial_building4.stl",
+    cfd_filepath="inputs/csv_with_everything.pkl",
+    stl_scale=1.0 / 1000.0,
+    res=30,
+    v_inf=(0.0, 13.6, 0.0),
+    bounds_input=np.array([[-100, 100], [30, 275], [0, 80]]),
+    n_restarts=6,
+    fit_pressure=True,
+    posterior_batch=100,
+    compute_variance=True,
+    var_res=50,
+    grid_eval=False,
 )
+
+# ---- reference forces [Fx, Fy, Fz] in N ----
+# TRUE_FORCE: the CFD/ANSYS-reported force (physical truth).
+TRUE_FORCE = np.array([155433.0, 208647.0, 72586.0])
+
+# MOMENTUM_FORCE: momentum integral evaluated on the interpolated ground-truth
+# field with many surface points (the integral's own floor). Set the values when
+# you have them; leave as None to skip the second (vs-momentum) comparison.
+# Example once known:  MOMENTUM_FORCE = np.array([Fx_mom, Fy_mom, Fz_mom])
+MOMENTUM_FORCE = np.array([155433.0, 214609.0, 72586.0])
 
 
 # ---------------------------------------------------------------------------
 # Run knobs
 # ---------------------------------------------------------------------------
-SEEDS = [7, 42, 67, 420, 1234, 15, 4321, 1324, 4213, 3, 696, 6767]
-MAX_WORKERS = 2
-PLOT_DIR = "plots_multi"
+import random
+def generate_seeds(n=24, min_gap=5, lo=0, hi=100000, rng_seed=None):
+    rng = random.Random(rng_seed)
+    slots = (hi - lo) // min_gap + 1
+    if slots < n:
+        raise ValueError("range too small for n seeds at this spacing")
+    chosen = rng.sample(range(slots), n)        # distinct slot indices
+    return sorted(lo + s * min_gap for s in chosen)
+# SEEDS = generate_seeds(rng_seed=42)
+# print(SEEDS)
+SEEDS = [7, 42, 67, 420, 1234, 15, 4321, 1324, 4213, 3, 696, 6767, 89403, 132, 432, 594, 6794, 9999]
+MAX_WORKERS = 6
+PLOT_DIR = "plots_forces"
+BAND = 0.05                          # +-5% acceptance band drawn on plots
 
 # Defaults applied to EVERY config unless the config overrides them.
 DEFAULT_N_PER_PHASE = 100
-DEFAULT_N_PHASES = 4            # phase 0 + (N_PHASES-1) adaptive phases
+DEFAULT_N_PHASES = 4                 # phase 0 + (N_PHASES-1) adaptive phases
 
-# Base initial cylinder + base adaptive config (matches the other studies). Each
-# named config below overrides a few keys of these, so differences are
-# attributable. n_points/n_new default to the config's n_per_phase; seed and
-# pool_seed are injected per run.
+# Base initial cylinder + base adaptive config (matches the other studies).
 BASE_INITIAL = dict(
     sample_method="cylinder",
     sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
@@ -72,17 +73,15 @@ BASE_ADAPTIVE = dict(
     pool_size=4000, resample_size=600, score_beta=2.0,
     shell_thick_in=0.20, shell_thick_out=0.20,
     front_frac=0.5, front_half_angle_deg=60.0,
-    fd_step=None,                       # fixed grid-free FD step (m); None -> auto
     frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
     excl_horizontal=1.2, excl_vertical=4.2,
     spread_radius=None,
+    fd_step=[1.0,1.0,1.0]
 )
 
 
 # ---------------------------------------------------------------------------
-# Config helpers: build override dicts, exactly like sensitivity_study.py, but
-# they are MERGED with the base + seed inside the worker (so they stay seed-free
-# and picklable here).
+# Config helpers: build override dicts; merged with base + seed in the worker.
 # ---------------------------------------------------------------------------
 def init_over(**overrides):
     """Initial-sampling overrides (sample_config keys), e.g. init_over(r_factor=1.4)."""
@@ -97,10 +96,7 @@ def adapt_over(**overrides):
 def cfg(name, init_overrides=None, adaptive_overrides=None,
         n_per_phase=None, n_phases=None):
     """One named config. n_per_phase / n_phases default to the module defaults.
-
-    Returns a picklable tuple consumed by the worker:
-        (name, init_overrides, adaptive_overrides, n_per_phase, n_phases)
-    """
+    Returns a picklable tuple consumed by the worker."""
     return (
         name,
         dict(init_overrides or {}),
@@ -111,40 +107,20 @@ def cfg(name, init_overrides=None, adaptive_overrides=None,
 
 
 # ---------------------------------------------------------------------------
-# The configs to compare. Mix any knobs you like; each runs over all SEEDS.
-# Uncomment / edit freely. Keep the list short - each config is SEEDS x phases
-# runs of run_gpr.
+# The configs to compare. Each runs over all SEEDS.
 # ---------------------------------------------------------------------------
 CONFIGS = [
-    # cfg("auto"),
-
-    # ---- difficulty-weight sweep ----
-    cfg("fd_step=0.6", adaptive_overrides=adapt_over(fd_step=0.6)),
-    cfg("fd_step=0.8", adaptive_overrides=adapt_over(fd_step=0.75)),
-    cfg("fd_step=1.0", adaptive_overrides=adapt_over(fd_step=1.0)),
-    cfg("fd_step=1.25", adaptive_overrides=adapt_over(fd_step=1.25)),
-    cfg("fd_step=1.5", adaptive_overrides=adapt_over(fd_step=1.5)),
-
-    # ---- grid-free FD step sweep ----
-    # cfg("fd_step=0.5", adaptive_overrides=adapt_over(fd_step=0.5)),
-    # cfg("fd_step=2.0", adaptive_overrides=adapt_over(fd_step=2.0)),
-    # cfg("fd_step=auto", adaptive_overrides=adapt_over(fd_step=None)),
-
-    # ---- shell thickness ----
-    # cfg("big shell",   adaptive_overrides=adapt_over(shell_thick_in=0.3, shell_thick_out=0.3)),
-    # cfg("small shell", adaptive_overrides=adapt_over(shell_thick_in=0.1, shell_thick_out=0.1)),
-
-    # ---- initial-sampling geometry ----
-    # cfg("r_factor=1.4", init_overrides=init_over(r_factor=1.4)),
-
-    # ---- per-config budget (drones/phase and #phases can differ per config) ----
-    # cfg("100x4", n_per_phase=100, n_phases=4),
-    # cfg("160x3", n_per_phase=160, n_phases=3),
+    # cfg("score_beta=2.0", adaptive_overrides=adapt_over(score_beta=2.0)),
+    # cfg("score_beta=0.0", adaptive_overrides=adapt_over(score_beta=0.0)),
+    cfg("beta=2.0, fd=1.0", adaptive_overrides=adapt_over(score_beta=2.0)),
+    cfg("beta=4.0, fd=1.0", adaptive_overrides=adapt_over(score_beta=4.0)),
+    cfg("beta=2.0, fd=auto", adaptive_overrides=adapt_over(score_beta=2.0, fd_step=None)),
+    cfg("beta=4.0, fd=auto", adaptive_overrides=adapt_over(score_beta=4.0, fd_step=None)),    
 ]
 
 
 # ---------------------------------------------------------------------------
-# Build the concrete run configs (merge base + overrides + seed) inside worker
+# Build the concrete run configs (merge base + overrides + seed) in the worker
 # ---------------------------------------------------------------------------
 def _make_initial(init_overrides, n_per_phase, seed):
     init = {k: (dict(v) if isinstance(v, dict) else v)
@@ -152,8 +128,6 @@ def _make_initial(init_overrides, n_per_phase, seed):
     sc = init["sample_config"]
     sc.update(init_overrides)
     sc["n_points"] = init_overrides.get("n_points", n_per_phase)
-    # carve a top-cap fraction out of the phase-0 budget (>=20 drones or 20%),
-    # matching the budget study's behaviour.
     sc["top_cap_frac"] = max(20.0 / max(n_per_phase, 1), 0.20)
     sc["seed"] = seed
     return init
@@ -181,8 +155,7 @@ def _free_heavy(res):
 
 # ---------------------------------------------------------------------------
 # One (config, seed) run: phase 0 + (n_phases-1) adaptive phases, sequential.
-# Returns list of (n_accumulated, force_vec). Mirrors the budget study's run_one
-# but with arbitrary init/adaptive overrides.
+# Returns list of (n_accumulated, force_vec).
 # ---------------------------------------------------------------------------
 def run_one(name, init_overrides, adaptive_overrides, n_per_phase, n_phases, seed):
     print(f"\n########## {name}  seed={seed} ##########", flush=True)
@@ -243,60 +216,193 @@ def _job(args):
         return (name, seed, [])
 
 
-# ---------------------------------------------------------------------------
-# Plot/aggregate. results_by_cfg uses the SAME shape the budget helpers expect:
-#   list of (label, runs, n_per_phase, n_phases)
-# where runs is a list (over seeds) of curves. So we can call B's figure makers.
-# ---------------------------------------------------------------------------
-def _make_figs(results_by_cfg):
-    os.makedirs(PLOT_DIR, exist_ok=True)
-    # point the budget module's PLOT_DIR at ours so its _save paths land here if
-    # any helper builds its own filename (we pass explicit names below anyway).
-    B.PLOT_DIR = PLOT_DIR
-    B.SEEDS = SEEDS
+# ===========================================================================
+# Aggregation helpers. Error metrics take an explicit reference force `ref`, so
+# the same GPR curves can be scored against TRUE_FORCE or MOMENTUM_FORCE.
+# ===========================================================================
+def _component(fv, comp):
+    return np.nan if fv is None else float(np.asarray(fv, float)[comp])
+
+
+def _relerr(fv, comp, ref):
+    """Signed relative error [%] of component `comp` against reference `ref`."""
+    if fv is None:
+        return np.nan
+    return 100.0 * (np.asarray(fv, float)[comp] - ref[comp]) / abs(ref[comp])
+
+
+def _inplane_relerr(fv, ref):
+    """In-plane (Fx,Fy) relative error magnitude [%] against reference `ref`."""
+    if fv is None:
+        return np.nan
+    d = np.asarray(fv, float)[:2] - ref[:2]
+    return 100.0 * np.linalg.norm(d) / np.linalg.norm(ref[:2])
+
+
+def _aggregate(all_runs, n_per_phase, n_phases, fn):
+    """Average fn(force_vec) across seeds at each PHASE STEP (0..n_phases-1).
+    Returns (x, mean, std, x_std). Each seed's curve has len == n_phases, so
+    phase step k is curve[k], no interpolation. Early-stopped seeds contribute
+    nan for missing tail phases (dropped by nanmean)."""
+    runs = [c for c in all_runs if c]
+    n_steps = n_phases
+    counts = np.full((len(runs), n_steps), np.nan)
+    vals = np.full((len(runs), n_steps), np.nan)
+    for i, c in enumerate(runs):
+        for k in range(min(len(c), n_steps)):
+            counts[i, k] = c[k][0]
+            vals[i, k] = fn(c[k][1])
+    with np.errstate(invalid="ignore"):
+        x = np.nanmean(counts, axis=0)
+        x_std = np.nanstd(counts, axis=0)
+        mean = np.nanmean(vals, axis=0)
+        std = np.nanstd(vals, axis=0)
+    return x, mean, std, x_std
+
+
+# ===========================================================================
+# Plotting helpers
+# ===========================================================================
+def _band_plot(ax, results_by_cfg, fn, ylabel, title, hline=None, band_abs=None,
+               band_rel_true=None, x_err=False, ymax_cap=None, fill_style="dashed"):
+    """Mean line +-1std per config. fn -> scalar from force_vec."""
+    colors = plt.cm.tab10(np.linspace(0, 1, len(results_by_cfg)))
+    finite = []
+    for (label, runs, npp, nph), color in zip(results_by_cfg, colors):
+        x, mean, std, x_std = _aggregate(runs, npp, nph, fn)
+        ax.plot(x, mean, "-o", color=color, label=label, markersize=4)
+        if fill_style == "fill":
+            ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.18)
+        else:
+            ax.plot(x, mean - std, ls="--", color=color, lw=0.9, alpha=0.4)
+            ax.plot(x, mean + std, ls="--", color=color, lw=0.9, alpha=0.4)
+        finite += [v for v in (mean - std) if np.isfinite(v)]
+        finite += [v for v in (mean + std) if np.isfinite(v)]
+        if x_err:
+            ax.errorbar(x, mean, xerr=x_std, fmt="none", ecolor=color,
+                        alpha=0.5, capsize=2)
+    if hline is not None:
+        ax.axhline(hline, ls="--", color="0.4")
+    if band_abs is not None:           # absolute force: +-5% band around the ref
+        ax.axhspan(band_abs * (1 - BAND), band_abs * (1 + BAND),
+                   color="0.5", alpha=0.12, label="+-5% band")
+    if band_rel_true is not None:      # rel-error plot: +-5% band around 0
+        ax.axhspan(-100 * BAND, 100 * BAND, color="0.5", alpha=0.12,
+                   label="+-5% band")
+    if ymax_cap is not None:
+        if finite:
+            lim = min(ymax_cap, max(abs(min(finite)), abs(max(finite)),
+                                    100 * BAND) * 1.1)
+        else:
+            lim = ymax_cap
+        ax.set_ylim(-lim, lim)
+    ax.set_xlabel("accumulated sampling points (mean per phase)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+
+
+def _save(fig, fname):
+    fig.tight_layout()
+    fig.savefig(fname, dpi=150)
+    print(f"saved {fname}")
+
+
+def _make_per_config_figs(results_by_cfg, ref, ref_name, out_dir, ymax_cap=50.0):
+    """One detailed figure per config: Fx and Fy relative-error convergence with
+    band, plus every individual seed line faint underneath. Errors are against
+    `ref` (labelled by ref_name); files land in out_dir/per_config_<ref_name>/."""
+    sub = os.path.join(out_dir, f"per_config_{ref_name}")
+    os.makedirs(sub, exist_ok=True)
     figs = []
-
-    # absolute Fx / Fy bands
-    fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
-    _band_plot(axes[0], results_by_cfg, lambda fv: _component(fv, 0),
-               "Fx [N]", "Multi-config: Fx / Fy convergence (mean +-1 std over seeds)",
-               hline=TRUE_FORCE[0], band_abs=TRUE_FORCE[0])
-    _band_plot(axes[1], results_by_cfg, lambda fv: _component(fv, 1),
-               "Fy [N]", "", hline=TRUE_FORCE[1], band_abs=TRUE_FORCE[1])
-    _save(fig, os.path.join(PLOT_DIR, "multi_fx_fy_band.png")); figs.append(fig)
-
-    # signed rel-error Fx / Fy bands
-    fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
-    _band_plot(axes[0], results_by_cfg, lambda fv: _relerr(fv, 0),
-               "Fx rel. error [%]",
-               "Multi-config: Fx / Fy relative error (mean +-1 std)",
-               hline=0.0, band_rel_true=True, ymax_cap=50.0)
-    _band_plot(axes[1], results_by_cfg, lambda fv: _relerr(fv, 1),
-               "Fy rel. error [%]", "", hline=0.0, band_rel_true=True, ymax_cap=50.0)
-    _save(fig, os.path.join(PLOT_DIR, "multi_fx_fy_relerr_band.png")); figs.append(fig)
-
-    # in-plane |Fx,Fy| rel error
-    fig, ax = plt.subplots(figsize=(10, 5))
-    _band_plot(ax, results_by_cfg, _inplane_relerr,
-               "in-plane (Fx,Fy) rel error [%]",
-               "Multi-config: in-plane relative error (mean +-1 std)", hline=0.0)
-    ax.axhspan(0.0, 100 * BAND, color="0.5", alpha=0.12, label="+-5% band")
-    top = ax.get_ylim()[1]
-    ax.set_ylim(0.0, min(50.0, max(top, 100 * BAND * 1.1)))
-    _save(fig, os.path.join(PLOT_DIR, "multi_relerr_inplane_band.png")); figs.append(fig)
-
-    # per-config detail: per config, Fx/Fy rel-error band + every seed trace faint
-    figs += _make_per_config_figs(results_by_cfg)
+    for label, runs, npp, nph in results_by_cfg:
+        fig, axes = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
+        for comp, (ax, name) in enumerate(zip(axes, ("Fx", "Fy"))):
+            finite = []
+            for c in runs:
+                if not c:
+                    continue
+                ns = [p[0] for p in c]
+                vs = [_relerr(p[1], comp, ref) for p in c]
+                ax.plot(ns, vs, "-", color="0.7", lw=0.8, alpha=0.6)
+                finite += [v for v in vs if np.isfinite(v)]
+            x, mean, std, x_std = _aggregate(
+                runs, npp, nph, lambda fv, cc=comp: _relerr(fv, cc, ref))
+            ax.plot(x, mean, "-o", color="tab:blue", markersize=4,
+                    label="mean over seeds")
+            ax.fill_between(x, mean - std, mean + std,
+                            color="tab:blue", alpha=0.2, label="+-1 std")
+            finite += [v for v in (mean - std) if np.isfinite(v)]
+            finite += [v for v in (mean + std) if np.isfinite(v)]
+            ax.axhline(0.0, ls="--", color="0.4", label="exact")
+            ax.axhspan(-100 * BAND, 100 * BAND, color="0.5", alpha=0.12,
+                       label="+-5% band")
+            ax.set_ylabel(f"{name} relative error [%]")
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, loc="best")
+            if finite:
+                lim = min(ymax_cap, max(abs(min(finite)), abs(max(finite)),
+                                        100 * BAND) * 1.1)
+            else:
+                lim = ymax_cap
+            ax.set_ylim(-lim, lim)
+        axes[1].set_xlabel("accumulated sampling points (mean per phase)")
+        axes[0].set_title(f"{label}: Fx / Fy rel. error vs {ref_name} "
+                          f"({len(SEEDS)} seeds, mean +-1 std)")
+        fname = os.path.join(sub, f"{label}.png")
+        _save(fig, fname); figs.append(fig)
     return figs
 
 
-def _print_summary(results_by_cfg):
-    print("\n\n=== full numeric summary: rel. error [%], mean +- std over seeds, "
-          "per phase ===")
+def _make_figs_for_ref(results_by_cfg, ref, ref_name):
+    """Emit the full figure set for one reference force (ref, labelled ref_name).
+    Files are suffixed _vs_<ref_name> so the truth and momentum sets don't clash."""
+    os.makedirs(PLOT_DIR, exist_ok=True)
+    figs = []
+    suff = f"_vs_{ref_name}"
+
+    # absolute Fx / Fy bands (band drawn around this reference)
+    fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
+    _band_plot(axes[0], results_by_cfg, lambda fv: _component(fv, 0),
+               "Fx [N]",
+               f"Fx / Fy convergence vs {ref_name} (mean +-1 std over seeds)",
+               hline=ref[0], band_abs=ref[0])
+    _band_plot(axes[1], results_by_cfg, lambda fv: _component(fv, 1),
+               "Fy [N]", "", hline=ref[1], band_abs=ref[1])
+    _save(fig, os.path.join(PLOT_DIR, f"fx_fy_band{suff}.png")); figs.append(fig)
+
+    # signed rel-error Fx / Fy bands (against this reference)
+    fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
+    _band_plot(axes[0], results_by_cfg, lambda fv: _relerr(fv, 0, ref),
+               "Fx rel. error [%]",
+               f"Fx / Fy relative error vs {ref_name} (mean +-1 std)",
+               hline=0.0, band_rel_true=True, ymax_cap=50.0)
+    _band_plot(axes[1], results_by_cfg, lambda fv: _relerr(fv, 1, ref),
+               "Fy rel. error [%]", "", hline=0.0, band_rel_true=True, ymax_cap=50.0)
+    _save(fig, os.path.join(PLOT_DIR, f"fx_fy_relerr_band{suff}.png")); figs.append(fig)
+
+    # in-plane |Fx,Fy| rel error (against this reference)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    _band_plot(ax, results_by_cfg, lambda fv: _inplane_relerr(fv, ref),
+               "in-plane (Fx,Fy) rel error [%]",
+               f"in-plane relative error vs {ref_name} (mean +-1 std)", hline=0.0)
+    ax.axhspan(0.0, 100 * BAND, color="0.5", alpha=0.12, label="+-5% band")
+    top = ax.get_ylim()[1]
+    ax.set_ylim(0.0, min(50.0, max(top, 100 * BAND * 1.1)))
+    _save(fig, os.path.join(PLOT_DIR, f"relerr_inplane_band{suff}.png")); figs.append(fig)
+
+    # per-config detail
+    figs += _make_per_config_figs(results_by_cfg, ref, ref_name, PLOT_DIR)
+    return figs
+
+
+def _print_summary_for_ref(results_by_cfg, ref, ref_name):
+    print(f"\n\n=== rel. error [%] vs {ref_name}, mean +- std over seeds, per phase ===")
     for label, runs, npp, nph in results_by_cfg:
-        x, mx, sx, xstd = _aggregate(runs, npp, nph, lambda fv: _relerr(fv, 0))
-        _, my, sy, _ = _aggregate(runs, npp, nph, lambda fv: _relerr(fv, 1))
-        _, mip, sip, _ = _aggregate(runs, npp, nph, _inplane_relerr)
+        x, mx, sx, xstd = _aggregate(runs, npp, nph, lambda fv: _relerr(fv, 0, ref))
+        _, my, sy, _ = _aggregate(runs, npp, nph, lambda fv: _relerr(fv, 1, ref))
+        _, mip, sip, _ = _aggregate(runs, npp, nph, lambda fv: _inplane_relerr(fv, ref))
         n_seeds = sum(1 for c in runs if c)
         print(f"\n  --- {label}  ({npp}/phase, {nph} phases incl. phase 0, "
               f"{n_seeds} seeds) ---")
@@ -308,6 +414,15 @@ def _print_summary(results_by_cfg):
                   f"{mx[k]:+8.3f} {sx[k]:6.3f}   "
                   f"{my[k]:+8.3f} {sy[k]:6.3f}   "
                   f"{mip[k]:9.3f} {sip[k]:6.3f}")
+
+
+def _references():
+    """List of (ref_force, ref_name) to score against. Always includes truth;
+    includes momentum only if MOMENTUM_FORCE is set."""
+    refs = [(np.asarray(TRUE_FORCE, float), "truth")]
+    if MOMENTUM_FORCE is not None:
+        refs.append((np.asarray(MOMENTUM_FORCE, float), "momentum"))
+    return refs
 
 
 def main(max_workers=MAX_WORKERS):
@@ -327,19 +442,21 @@ def main(max_workers=MAX_WORKERS):
         runs = [collected.get((name, s), []) for s in SEEDS]
         results_by_cfg.append((name, runs, npp, nph))
 
-    # final-phase in-plane error per seed (quick scan)
-    print("\n\n=== final-phase in-plane (Fx,Fy) relative error [%], per seed ===")
-    for name, runs, npp, nph in results_by_cfg:
-        cells = []
-        for seed, c in zip(SEEDS, runs):
-            cells.append(f"s{seed}:fail" if not c
-                         else f"s{seed}:{_inplane_relerr(c[-1][1]):.2f}")
-        print(f"  {name:16s}: " + "  ".join(cells))
-
-    _print_summary(results_by_cfg)
-
     os.makedirs(PLOT_DIR, exist_ok=True)
-    _make_figs(results_by_cfg)
+
+    # For each reference (truth, and momentum if set): quick per-seed scan,
+    # numeric summary, and the full figure set.
+    for ref, ref_name in _references():
+        print(f"\n\n=== final-phase in-plane (Fx,Fy) rel error [%] vs {ref_name}, per seed ===")
+        for name, runs, npp, nph in results_by_cfg:
+            cells = []
+            for seed, c in zip(SEEDS, runs):
+                cells.append(f"s{seed}:fail" if not c
+                             else f"s{seed}:{_inplane_relerr(c[-1][1], ref):.2f}")
+            print(f"  {name:16s}: " + "  ".join(cells))
+        _print_summary_for_ref(results_by_cfg, ref, ref_name)
+        _make_figs_for_ref(results_by_cfg, ref, ref_name)
+
     plt.show()
     return results_by_cfg
 
