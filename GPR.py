@@ -699,6 +699,7 @@ def run_gpr(
         "GPR_posterior": GPR_posterior,
         "GPR_variances": GPR_variances,
         "cfd_test_vels": cfd_test_vels,
+        "cfd_test_press": cfd_p,        # CFD pressure truth on grid (None if grid-free)
         "pressure_posterior": pressure_posterior,
         "training_coords": training_coords,
         "mesh_vertices": np.asarray(solver.mesh.vertices),
@@ -718,32 +719,16 @@ def run_gpr(
         "grid_eval": grid_eval,
     }
 
-    if not grid_eval:
-        # Grid-free: adaptive sampling must re-evaluate the Julia prior on its own
-        # candidate points, which needs the panel solver ALIVE. Expose the prior
-        # closure + the trained Cholesky factors and DEFER closing the solver to
-        # propose_adaptive_points (which calls result["_close_solver"]() when done).
-        # main.py runs phases sequentially and proposes immediately after each
-        # run_gpr, so at most one solver is alive at a time - no accumulation.
-        _result["_prior_fn"] = prior_fn
-        _result["_chol_c"] = c
-        _result["_chol_low"] = low
+    _result["_prior_fn"] = prior_fn
+    _result["_chol_c"] = c
+    _result["_chol_low"] = low
 
-        def _close_solver(_s=solver):
-            try:
-                _s.close()
-            except Exception:
-                pass
-        _result["_close_solver"] = _close_solver
-    else:
-        # Grid path already has everything it needs as numpy copies; shut the
-        # Julia panel server down now rather than waiting for the atexit hook.
-        # Each run_gpr starts a fresh FLOWPanelSolver -> a fresh Julia process; if
-        # only closed at exit they accumulate across phases and exhaust memory.
+    def _close_solver(_s=solver):
         try:
-            solver.close()
+            _s.close()
         except Exception:
             pass
+    _result["_close_solver"] = _close_solver
 
     return _result
 

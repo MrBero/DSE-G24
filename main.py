@@ -1,5 +1,6 @@
 from GPR import run_gpr
-from PLOT import plot_all, save_all, plot_force_convergence
+from PLOT import (plot_all, save_all, plot_force_convergence,
+                  triptych_field_vlim, multi_slice_vlim, pressure_triptych_vlim)
 from adaptive import propose_adaptive_points, propose_top_cap_points
 import numpy as np
 
@@ -9,7 +10,7 @@ COMMON = dict(
     stl_filepath="input_stls/Aerospecial_building4.stl",
     cfd_filepath="inputs/csv_with_everything.pkl",
     stl_scale=1.0 / 1000.0,
-    res=30,
+    res=100,
     v_inf=(0.0, 13.6, 0.0),
     bounds_input=np.array([[-100, 100], [30, 275], [0, 80]]),
     n_restarts=6,
@@ -17,7 +18,7 @@ COMMON = dict(
     posterior_batch=100,
     compute_variance=True,
     var_res=50,
-    grid_eval=False,
+    grid_eval=True,
 )
 
 # initial sampling: tilted cylinder (gives us cylinder_geom for the adaptive regions)
@@ -179,7 +180,17 @@ def main():
     # Plotting needs the res^3 grid fields, which only exist when grid_eval=True.
     PLOTS = bool(COMMON.get("grid_eval", False))
     if PLOTS:
-        save_all(result, out_dir="plots", phase_label="phase0", z_slice_target=25, show=False, true_force=TRUE_FORCE)
+        FIELD_VLIM, DIFF_VLIM = triptych_field_vlim(result, z_slice_target=25)
+        VAR_VLIM = multi_slice_vlim(result, field="variances")
+        PRESS_VLIM, PRESS_DIFF_VLIM = pressure_triptych_vlim(result, z_slice_target=25)
+        PRESS_DIFF_VLIM = None
+    else:
+        FIELD_VLIM = DIFF_VLIM = VAR_VLIM = PRESS_VLIM = PRESS_DIFF_VLIM = None
+    if PLOTS:
+        save_all(result, out_dir="plots", phase_label="phase0", z_slice_target=25,
+                 show=False, true_force=TRUE_FORCE,
+                 field_vlim=FIELD_VLIM, diff_vlim=DIFF_VLIM, var_vlim=VAR_VLIM,
+                 press_vlim=PRESS_VLIM, press_diff_vlim=PRESS_DIFF_VLIM)
     _print_rmse(0, result)
     results = [result]
     force_curve = [(len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec"))]
@@ -231,7 +242,7 @@ def main():
         )
         result["cylinder_geom"] = cylinder_geom   # keep geometry available downstream
         if PLOTS:
-            save_all(result, out_dir="plots", phase_label=f"phase{phase}", z_slice_target=25, show=False, true_force=TRUE_FORCE)
+            save_all(result, out_dir="plots", phase_label=f"phase{phase}", z_slice_target=25, show=False, true_force=TRUE_FORCE, field_vlim=FIELD_VLIM, diff_vlim=DIFF_VLIM, var_vlim=VAR_VLIM, press_vlim=PRESS_VLIM, press_diff_vlim=PRESS_DIFF_VLIM)
         results.append(result)
         _print_rmse(phase, result)
         force_curve.append((len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec")))
@@ -253,7 +264,9 @@ def main():
             result["cylinder_geom"] = cylinder_geom
             if PLOTS:
                 save_all(result, out_dir="plots", phase_label="phase_topcap",
-                         z_slice_target=25, show=False, true_force=TRUE_FORCE)
+                         z_slice_target=25, show=False, true_force=TRUE_FORCE,
+                         field_vlim=FIELD_VLIM, diff_vlim=DIFF_VLIM, var_vlim=VAR_VLIM,
+                         press_vlim=PRESS_VLIM, press_diff_vlim=PRESS_DIFF_VLIM)
             results.append(result)
             _print_rmse("top-cap", result)
             force_curve.append((len(accumulated), result["metrics"].get("force_mag"), result["metrics"].get("force_vec")))

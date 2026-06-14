@@ -52,12 +52,12 @@ MAX_WORKERS = 6                      # parallel processes; start 2-3, raise caut
 # (phase 0 included). phase 0 = initial cylinder of n_per_phase, then
 # (n_phases-1) adaptive batches of n_per_phase.
 ALLOCATIONS = [
-    ("67x6",  67,  6),
-    ("80x5",  80,  5),
+    # ("67x6",  67,  6),
+    # ("80x5",  80,  5),
     ("100x4", 100, 4),
-    ("133x3", 133, 3),
-    ("160x3", 160, 3),    
-    ("200x2", 200, 2),
+    # ("133x3", 133, 3),
+    # ("160x3", 160, 3),    
+    # ("200x2", 200, 2),
 ]
 
 # Base adaptive config (matches the main sensitivity study). n_new is overridden

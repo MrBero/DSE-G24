@@ -41,7 +41,7 @@ import sensitivity_study_budget_parallel as B
 from sensitivity_study_budget_parallel import (
     COMMON, TRUE_FORCE, BAND,
     _component, _relerr, _inplane_relerr,
-    _aggregate, _band_plot, _save,
+    _aggregate, _band_plot, _save, _make_per_config_figs,
 )
 
 
@@ -49,7 +49,7 @@ from sensitivity_study_budget_parallel import (
 # Run knobs
 # ---------------------------------------------------------------------------
 SEEDS = [7, 42, 67, 420, 1234, 15, 4321, 1324, 4213, 3, 696, 6767]
-MAX_WORKERS = 6
+MAX_WORKERS = 2
 PLOT_DIR = "plots_multi"
 
 # Defaults applied to EVERY config unless the config overrides them.
@@ -116,15 +116,14 @@ def cfg(name, init_overrides=None, adaptive_overrides=None,
 # runs of run_gpr.
 # ---------------------------------------------------------------------------
 CONFIGS = [
-    cfg("auto"),
+    # cfg("auto"),
 
     # ---- difficulty-weight sweep ----
-    cfg("fd_step=0.1", adaptive_overrides=adapt_over(fd_step=0.1)),
-    cfg("fd_step=0.5", adaptive_overrides=adapt_over(fd_step=0.5)),
+    cfg("fd_step=0.6", adaptive_overrides=adapt_over(fd_step=0.6)),
+    cfg("fd_step=0.8", adaptive_overrides=adapt_over(fd_step=0.75)),
     cfg("fd_step=1.0", adaptive_overrides=adapt_over(fd_step=1.0)),
-    cfg("fd_step=2.0", adaptive_overrides=adapt_over(fd_step=2.0)),
-    cfg("fd_step=5.0", adaptive_overrides=adapt_over(fd_step=5.0)),
-    cfg("fd_step=10.0", adaptive_overrides=adapt_over(fd_step=10.0)),
+    cfg("fd_step=1.25", adaptive_overrides=adapt_over(fd_step=1.25)),
+    cfg("fd_step=1.5", adaptive_overrides=adapt_over(fd_step=1.5)),
 
     # ---- grid-free FD step sweep ----
     # cfg("fd_step=0.5", adaptive_overrides=adapt_over(fd_step=0.5)),
@@ -254,6 +253,7 @@ def _make_figs(results_by_cfg):
     # point the budget module's PLOT_DIR at ours so its _save paths land here if
     # any helper builds its own filename (we pass explicit names below anyway).
     B.PLOT_DIR = PLOT_DIR
+    B.SEEDS = SEEDS
     figs = []
 
     # absolute Fx / Fy bands
@@ -284,6 +284,9 @@ def _make_figs(results_by_cfg):
     top = ax.get_ylim()[1]
     ax.set_ylim(0.0, min(50.0, max(top, 100 * BAND * 1.1)))
     _save(fig, os.path.join(PLOT_DIR, "multi_relerr_inplane_band.png")); figs.append(fig)
+
+    # per-config detail: per config, Fx/Fy rel-error band + every seed trace faint
+    figs += _make_per_config_figs(results_by_cfg)
     return figs
 
 
