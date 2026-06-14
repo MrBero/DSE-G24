@@ -72,13 +72,13 @@ def plot_posterior_3d(result, max_field_points=6000, field_alpha=0.06):
     fig.colorbar(sc, ax=ax, label="|velocity|")
 
     ax.scatter3D(mesh_vertices[:,0], mesh_vertices[:,1], mesh_vertices[:,2], c='black')
-    ax.quiver(*(v_inf*3), *v_inf, length=3)
+    ax.quiver(*(-v_inf*3), *v_inf, length=3)
 
     # training samples drawn last, opaque, large, no depth fading
     ax.scatter3D(training_coords[:, 0], training_coords[:, 1], training_coords[:, 2], c="red", s=60, depthshade=False, edgecolors="white", linewidths=0.6, label="training samples", zorder=10)
     ax.legend(loc="upper right")
 
-    ax.set_title("GPR posterior velocity magnitude")
+    ax.set_title("GPR Point Distribution")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
@@ -255,20 +255,3 @@ def plot_pressure_slice(result, z_slice_target=2.5):
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     return fig
-
-
-def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
-    figs = [
-        plot_posterior_3d(result),
-        plot_slice_comparison(result, z_slice_target),
-        plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z", slice_range=(5,50)),
-        plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z", slice_range=(5,50))
-        # plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z"),
-        # plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z")
-    ]
-    pf = plot_pressure_slice(result, z_slice_target)
-    if pf is not None:
-        figs.append(pf)
-    if show:
-        plt.show()
-    return figs

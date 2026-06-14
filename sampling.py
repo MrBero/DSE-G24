@@ -76,7 +76,7 @@ def _oblique_cylinder_points(stl_mesh,
 
     R = r_factor * char_size
     H = h_factor * char_size
-
+    print(f"Object Characteristic Length: {char_size:.3f}m, Cylinder Radius: {R:.3f}m, Cylinder Height: {H:.3f}m")
     z_lo = V[:, 2].min()
     z_hi = V[:, 2].max()
     z_mid = 0.5 * (z_lo + z_hi)
@@ -338,6 +338,7 @@ def sample(
         del cfd
     else:  # .pkl / .pickle large case
         print("Building interpolator (fast KD-tree sampler)...")
+        print(cfd)
         sample_dat_shi = build_cfd_sampler(cfd, n_points=8, sharpness=2)
         del cfd
 
@@ -405,6 +406,7 @@ def sample(
         raise ValueError(f"unknown method {method!r}")
 
     values = sample_dat_shi(points)
+    # print(values)
 
     columns = [
         "x-target", "y-target", "z-target",

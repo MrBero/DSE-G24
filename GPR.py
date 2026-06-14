@@ -1,5 +1,6 @@
 import os
 import pickle
+import re
 
 # Force CPU before importing JAX.
 os.environ["JAX_PLATFORMS"] = "cpu"
@@ -26,6 +27,7 @@ jax.config.update("jax_enable_x64", True)
 
 from flowpanelwrapper import FLOWPanelSolver
 from sampling import sample
+from INTERP.interpolation import build_cfd_sampler
 
 from alive_progress import alive_bar
 import time
@@ -241,6 +243,7 @@ SAMPLE_DEFAULTS = {
 def run_gpr(
     stl_filepath="input_stls/triangle.stl",
     cfd_filepath="inputs/FLTG.csv",
+    prior_means_filepath=None,
     stl_scale=1.0 / 1000.0,
     stl_rotate = None,
     bounds_input = None,
@@ -279,7 +282,7 @@ def run_gpr(
 
         bar.text('Sampling...')
         # --- Sample training data ---
-        ground_truth, bounds, sample_dat_shi, cylinder_geom = sample(                           #BIKTOR HERE IS GEOMETRY
+        ground_truth, bounds, sample_dat_shi, cylinder_geom = sample(
         cfd_filepath, stl_mesh, sample_method=sample_method, num_samples=num_samples,
         sample_config=sample_config, v_inf=v_inf,
         epsilon=0.02, use_signed_distance=True,)
@@ -306,60 +309,82 @@ def run_gpr(
         print(f'testing points: {test_points.shape[0]}')
         bar()
 
-        bar.text('Computing prior means (potential flow solver in Julia)...')
-        # --- Prior mean (panel solver), streamed over the grid ---
         n_test = test_points.shape[0]
         n_chunks = (n_test + posterior_batch - 1) // posterior_batch
 
-        # Cache the Julia prior on the grid. Valid as long as geometry + CFD
-        # bounds are unchanged; res and v_inf are encoded in the filename so
-        # changing either picks a different cache automatically.
-        os.makedirs("prior_cache", exist_ok=True)
-        prior_file = os.path.join(
-            "prior_cache",
-            f"grid_prior_res{res}_vinf{v_inf[0]:g}_{v_inf[1]:g}_{v_inf[2]:g}.pkl",
-        )
+        if prior_means_filepath is None:
+            bar.text('Computing prior means (potential flow solver in Julia)...')
+            # --- Prior mean (panel solver), streamed over the grid ---
 
-        if os.path.exists(prior_file):
-            with open(prior_file, "rb") as f:
-                means_tests = pickle.load(f)
-            if means_tests.shape != (n_test, 3):
-                raise RuntimeError(
-                    f"Cached prior {means_tests.shape} != expected {(n_test, 3)}. "
-                    f"Delete {prior_file} and rerun."
-                )
-            print(f"loaded cached grid prior from {prior_file} (skipping Julia)", flush=True)
-        else:
-            tolerance = True
-            if tolerance:
-                near_tol = 0.02 * solver.diag
-                print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
-            means_tests = np.empty((n_test, 3), dtype=float)
+            # Cache the Julia prior on the grid. Valid as long as geometry + CFD
+            # bounds are unchanged; res and v_inf and stl filename are encoded in the filename so
+            # changing either picks a different cache automatically.
 
-            # after solver is built, before the prior loop:
-            test_pt = solver.mesh.bounds.mean(axis=0).reshape(1, 3)  # a point at the mesh center → should be inside
-            print("contains center:", solver.mesh.contains(test_pt))   # expect [True]
-            print("is_watertight:", solver.mesh.is_watertight)
-            print("is_winding_consistent:", solver.mesh.is_winding_consistent)
-            for ci, i in enumerate(range(0, n_test, posterior_batch)):
-                chunk = test_points[i:i + posterior_batch]
+            match = re.search(r"([^/]+)\.[^.]+$", stl_filepath)
+            if match:
+                filename = match.group(1)
+
+            os.makedirs("prior_cache", exist_ok=True)
+            prior_file = os.path.join(
+                "prior_cache",
+                f"grid_prior_res{res}_vinf{v_inf[0]:g}_{v_inf[1]:g}_{v_inf[2]:g}_{filename}.pkl",
+            )
+
+            if os.path.exists(prior_file):
+                with open(prior_file, "rb") as f:
+                    means_tests = pickle.load(f)
+                if means_tests.shape != (n_test, 3):
+                    raise RuntimeError(
+                        f"Cached prior {means_tests.shape} != expected {(n_test, 3)}. "
+                        f"Delete {prior_file} and rerun."
+                    )
+                print(f"loaded cached grid prior from {prior_file} (skipping Julia)", flush=True)
+            else:
+                tolerance = True
                 if tolerance:
-                    means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True, blank_near=True, near_tol=near_tol).reshape(-1, 3)
-                else:
-                    means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
-                if (ci % 50 == 0 or ci == n_chunks - 1):
-                    print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
-            with open(prior_file, "wb") as f:
-                pickle.dump(means_tests, f)
-            print(f"saved grid prior to {prior_file}", flush=True)
+                    near_tol = 0.02 * solver.diag
+                    print(f"near_tol = {near_tol:.4g} (median panel edge)", flush=True)
+                means_tests = np.empty((n_test, 3), dtype=float)
 
-        
-        means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
-        if np.isnan(means_training).any():
-            raise RuntimeError("NaNs in direct prior mean at training points.")
-        means_training = means_training.reshape(-1, 1)
+                # after solver is built, before the prior loop:
+                test_pt = solver.mesh.bounds.mean(axis=0).reshape(1, 3)  # a point at the mesh center → should be inside
+                print("contains center:", solver.mesh.contains(test_pt))   # expect [True]
+                print("is_watertight:", solver.mesh.is_watertight)
+                print("is_winding_consistent:", solver.mesh.is_winding_consistent)
+                for ci, i in enumerate(range(0, n_test, posterior_batch)):
+                    chunk = test_points[i:i + posterior_batch]
+                    if tolerance:
+                        means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True, blank_near=True, near_tol=near_tol).reshape(-1, 3)
+                    else:
+                        means_tests[i:i+posterior_batch] = solver.velocity(chunk, blank_interior=True).reshape(-1, 3)
+                    if (ci % 50 == 0 or ci == n_chunks - 1):
+                        print(f"prior chunk {ci + 1}/{n_chunks}", flush=True)
+                with open(prior_file, "wb") as f:
+                    pickle.dump(means_tests, f)
+                print(f"saved grid prior to {prior_file}", flush=True)
 
-        prior_train_rmse = rmse(means_training, training_vels)
+            
+            means_training = solver.velocity(training_coords, blank_interior=False).reshape(-1, 3)
+            if np.isnan(means_training).any():
+                raise RuntimeError("NaNs in direct prior mean at training points.")
+            means_training = means_training.reshape(-1, 1)
+
+            prior_train_rmse = rmse(means_training, training_vels)
+        else:
+            bar.text('Obtaining CFD Prior Means...')
+            cfd = pd.read_pickle(prior_means_filepath)
+            cfd.columns = cfd.columns.str.strip()
+            # print(training_coords.shape)
+            sample_means = build_cfd_sampler(cfd, n_points=8, sharpness=2)
+            means_tests = sample_means(test_points)[:,:-1]
+            means_training = sample_means(training_coords)[:,:-1].reshape(-1,1)
+            prior_train_rmse = None
+            # print(means_training)
+            # print(means_tests)
+            
+            # .reshape(-1,1)
+            del cfd
+
         bar()
 
         bar.text('Fit hyperparameters')
@@ -393,7 +418,7 @@ def run_gpr(
             batch=posterior_batch, progress_every=posterior_batch*10)
         GPR_posterior = np.array(GPR_posterior).reshape(-1, 3)
 
-        bar.text("Variance posterior (skipped)...")
+        bar.text("Variance posterior...")
         compute_variance = True   # flip to True when you want uncertainty maps
         if compute_variance:
             GPR_variances = posterior_vars_batched(
