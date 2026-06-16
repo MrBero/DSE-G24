@@ -64,7 +64,7 @@ MOMENTUM_FORCE = np.array([155433.0, 214609.0, 72586.0])
 # Run knobs
 # ---------------------------------------------------------------------------
 import random
-def generate_seeds(n=24, min_gap=7, lo=0, hi=100000, rng_seed=None):
+def generate_seeds(n=16, min_gap=7, lo=0, hi=100000, rng_seed=None):
     rng = random.Random(rng_seed)
     slots = (hi - lo) // min_gap + 1
     if slots < n:
@@ -92,7 +92,7 @@ BASE_INITIAL = dict(
 
 BASE_ADAPTIVE = dict(
     w_var=0.2, w_grad=0.4, w_vort=0.4,
-    pool_size=4000, resample_size=600, score_beta=4.0,
+    pool_size=4000, resample_size=600, score_beta=2.0,
     shell_thick_in=0.20, shell_thick_out=0.20,
     front_frac=0.5, front_half_angle_deg=60.0,
     frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
@@ -135,12 +135,12 @@ CONFIGS = [
     # cfg("score_beta=2.0", adaptive_overrides=adapt_over(score_beta=2.0)),
     # cfg("score_beta=0.0", adaptive_overrides=adapt_over(score_beta=0.0)),
     cfg("fd_step=auto", adaptive_overrides=adapt_over(fd_step=None)),
+    cfg("fd_step=0.1", adaptive_overrides=adapt_over(fd_step=0.1)),
     cfg("fd_step=0.5", adaptive_overrides=adapt_over(fd_step=0.5)),
-    cfg("fd_step=0.75", adaptive_overrides=adapt_over(fd_step=0.75)),
     cfg("fd_step=1.0", adaptive_overrides=adapt_over(fd_step=1.0)),
-    cfg("fd_step=1.5", adaptive_overrides=adapt_over(fd_step=1.5)),
     cfg("fd_step=2.0", adaptive_overrides=adapt_over(fd_step=2.0)),
-    cfg("fd_step=3.0", adaptive_overrides=adapt_over(fd_step=3.0)),     
+    cfg("fd_step=5.0", adaptive_overrides=adapt_over(fd_step=5.0)),
+    cfg("fd_step=10.0", adaptive_overrides=adapt_over(fd_step=10.0)),     
 ]
 
 

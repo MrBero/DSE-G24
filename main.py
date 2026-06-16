@@ -27,7 +27,7 @@ COMMON = dict(
 # initial sampling: tilted cylinder (gives us cylinder_geom for the adaptive regions)
 INITIAL_SAMPLING = dict(
     sample_method="cylinder",
-    sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
+    sample_config={"r_factor": 1.0, "h_factor": 1.5, "tilt_deg": 10,
                    "n_points": 100, "front_frac": 0.25, "front_half_angle_deg": 45,
                    "top_cap": True, "top_cap_frac": 0.2},
 )
