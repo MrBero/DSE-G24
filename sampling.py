@@ -297,24 +297,37 @@ def _freestream_mask(points, prior_fn, v_inf, tol):
     # True = disturbed, False = essentially freestream (drop).
     return deviation > tol
 
-def sample(
-    field_path,
-    stl_mesh,
-    samples=None,
-    sample_method="CSV",
-    sample_config=None,
-    v_inf=None,
-    epsilon=0.02,
-    num_samples=150,
-    use_signed_distance=True,
-    oversample_factor=4,
-    max_random_iters=100,
-):
-    method = sample_method
-    config = sample_config
-    cylinder_geom = None  
+# =============================================================================
+# CFD load + interpolator cache
+# =============================================================================
+# The CFD field (21M rows) and its KD-tree sampler depend ONLY on the file path
+# and contents. Re-reading the pickle and rebuilding the sampler on every
+# run_gpr call (once per adaptive phase) was pure redundant I/O. We memoize the
+# load+build keyed on (abspath, mtime, size) so a regenerated file is detected
+# and reloaded, but identical files within a run are loaded exactly once.
+#
+# The cached sample_dat_shi is the SAME object returned to every caller, so all
+# downstream interpolated values are bit-identical to the old per-call behavior.
+_CFD_CACHE = {}
 
-    # ---- load CFD field: support both .csv and .pkl/.pickle ----
+
+def _load_cfd_field(field_path):
+    """Return (source_coords, source_values, bounds, sample_dat_shi), cached.
+
+    Identical output to the old inline load path; just computed once per file.
+    """
+    abspath = os.path.abspath(field_path)
+    try:
+        st = os.stat(abspath)
+        key = (abspath, st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (abspath, None, None)
+
+    hit = _CFD_CACHE.get(abspath)
+    if hit is not None and hit[0] == key:
+        print('Reading pickle... (cached)')
+        return hit[1]
+
     ext = os.path.splitext(field_path)[1].lower()
     if ext in (".pkl", ".pickle"):
         print('Reading pickle...')
@@ -347,9 +360,9 @@ def sample(
 
     if ext == ".csv":
         print("Building interpolator (griddata)...")
-        def sample_dat_shi(points):
+        def sample_dat_shi(points, _sc=source_coords, _sv=source_values):
             return sp.interpolate.griddata(
-                source_coords, source_values, points,
+                _sc, _sv, points,
                 method="linear", fill_value=np.nan,
             )
         del cfd
@@ -357,6 +370,37 @@ def sample(
         print("Building interpolator (fast KD-tree sampler)...")
         sample_dat_shi = build_cfd_sampler(cfd, n_points=8, sharpness=2)
         del cfd
+
+    payload = (source_coords, source_values, bounds, sample_dat_shi)
+    _CFD_CACHE[abspath] = (key, payload)
+    return payload
+
+
+def clear_cfd_cache():
+    """Drop the cached CFD field(s). Call if you need to free the ~GB DataFrame
+    artifacts mid-process; normally left resident for reuse across phases."""
+    _CFD_CACHE.clear()
+
+
+def sample(
+    field_path,
+    stl_mesh,
+    samples=None,
+    sample_method="CSV",
+    sample_config=None,
+    v_inf=None,
+    epsilon=0.02,
+    num_samples=150,
+    use_signed_distance=True,
+    oversample_factor=4,
+    max_random_iters=100,
+):
+    method = sample_method
+    config = sample_config
+    cylinder_geom = None  
+
+    # ---- load CFD field (cached across calls/phases) ----
+    source_coords, source_values, bounds, sample_dat_shi = _load_cfd_field(field_path)
 
     def reject(points):
         return points[_mesh_reject_mask(

@@ -64,18 +64,18 @@ MOMENTUM_FORCE = np.array([155433.0, 214609.0, 72586.0])
 # Run knobs
 # ---------------------------------------------------------------------------
 import random
-def generate_seeds(n=48, min_gap=7, lo=0, hi=100000, rng_seed=None):
+def generate_seeds(n=24, min_gap=7, lo=0, hi=100000, rng_seed=None):
     rng = random.Random(rng_seed)
     slots = (hi - lo) // min_gap + 1
     if slots < n:
         raise ValueError("range too small for n seeds at this spacing")
     chosen = rng.sample(range(slots), n)        # distinct slot indices
     return sorted(lo + s * min_gap for s in chosen)
-SEEDS = generate_seeds(rng_seed=69)
+SEEDS = generate_seeds(rng_seed=67)
 print(SEEDS)
 # SEEDS = [7, 42, 67, 420]#, 1234, 15, 4321, 1324, 4213, 3, 696, 6767, 89403, 132, 432, 594]
 MAX_WORKERS = 8   # 8 workers x 1 thread each = 8 physical cores (see THREADS_PER_WORKER)
-PLOT_DIR = "plots_drone_config"
+PLOT_DIR = "plots_fd_step"
 BAND = 0.05                          # +-5% acceptance band drawn on plots
 
 # Defaults applied to EVERY config unless the config overrides them.
@@ -134,16 +134,13 @@ def cfg(name, init_overrides=None, adaptive_overrides=None,
 CONFIGS = [
     # cfg("score_beta=2.0", adaptive_overrides=adapt_over(score_beta=2.0)),
     # cfg("score_beta=0.0", adaptive_overrides=adapt_over(score_beta=0.0)),
-    # cfg("beta=2.0, fd=1.0", adaptive_overrides=adapt_over(score_beta=2.0)),
-    # cfg("beta=4.0, fd=1.0", adaptive_overrides=adapt_over(score_beta=4.0)),
-    # cfg("beta=2.0, fd=auto", adaptive_overrides=adapt_over(score_beta=2.0, fd_step=None)),
-    # cfg("beta=4.0, fd=auto", adaptive_overrides=adapt_over(score_beta=4.0, fd_step=None)),
-    cfg("6x67",  n_per_phase=67,  n_phases=6),
-    cfg("5x80",  n_per_phase=80,  n_phases=5),
-    cfg("4x100", n_per_phase=100, n_phases=4),
-    cfg("3x133", n_per_phase=133, n_phases=3),
-    cfg("2x200", n_per_phase=200, n_phases=2),
-    cfg("1x400", n_per_phase=400, n_phases=1),
+    cfg("fd_step=auto", adaptive_overrides=adapt_over(fd_step=None)),
+    cfg("fd_step=0.5", adaptive_overrides=adapt_over(fd_step=0.5)),
+    cfg("fd_step=0.75", adaptive_overrides=adapt_over(fd_step=0.75)),
+    cfg("fd_step=1.0", adaptive_overrides=adapt_over(fd_step=1.0)),
+    cfg("fd_step=1.5", adaptive_overrides=adapt_over(fd_step=1.5)),
+    cfg("fd_step=2.0", adaptive_overrides=adapt_over(fd_step=2.0)),
+    cfg("fd_step=3.0", adaptive_overrides=adapt_over(fd_step=3.0)),     
 ]
 
 

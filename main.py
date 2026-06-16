@@ -4,6 +4,8 @@ from PLOT import (plot_all, save_all, plot_force_convergence,
                   plot_variance_across_phases)
 from adaptive import propose_adaptive_points, propose_top_cap_points
 import numpy as np
+import trimesh
+from flowpanelwrapper import FLOWPanelSolver
 
 
 # ---- shared run settings (kept identical across phases so only sampling changes) ----
@@ -19,7 +21,7 @@ COMMON = dict(
     posterior_batch=100,
     compute_variance=True,
     var_res=50,
-    grid_eval=True,
+    grid_eval=False,
 )
 
 # initial sampling: tilted cylinder (gives us cylinder_geom for the adaptive regions)
@@ -48,7 +50,7 @@ ADAPTIVE_CFG = dict(
     # difficulty score (computed on the existing res^3 grid via np.gradient)
     w_var=0.2, w_grad=0.4, w_vort=0.4,   # favor gradient + vorticity
     # weighted-LHS candidate pool over the thick tilted cylinder shell
-    pool_size=4000, resample_size=600, score_beta=2.0,
+    pool_size=4000, resample_size=600, score_beta=4.0,
     shell_thick_in=0.20, shell_thick_out=0.20,   # shell spans 0.7R .. 1.3R
     front_frac=0.5, front_half_angle_deg=60.0,   # bias toward the wake side
     # per-phase budget (mostly on-cylinder)
@@ -162,9 +164,30 @@ def _variance_snapshot(result, cylinder_geom):
 
 
 def main():
+    # ---------- shared Julia panel solver (built ONCE, reused every phase) ----------
+    # The panel solver depends only on (mesh, v_inf), which are constant across
+    # all phases in a run. Previously each run_gpr launched + JIT-compiled +
+    # tore down its own Julia process; building one here and passing it in skips
+    # that per-phase cold start. Closed once in the finally block below.
+    _shared_mesh = trimesh.load_mesh(COMMON["stl_filepath"])
+    if COMMON["stl_scale"] != 1.0:
+        _shared_mesh.apply_scale(COMMON["stl_scale"])
+    shared_solver = FLOWPanelSolver(
+        _shared_mesh, COMMON["v_inf"], julia_script="FP.jl",
+        julia_bin="julia", verbose=False)
+    try:
+        return _main_impl(shared_solver)
+    finally:
+        try:
+            shared_solver.close()
+        except Exception:
+            pass
+
+
+def _main_impl(shared_solver):
     # ---------- phase 0: initial cylinder run ----------
     print("\n=== PHASE 0 (initial cylinder sampling) ===")
-    result = run_gpr(**COMMON, **INITIAL_SAMPLING)
+    result = run_gpr(**COMMON, **INITIAL_SAMPLING, solver=shared_solver)
 
     # The adaptive regions always attach to the ORIGINAL cylinder. Re-runs use
     # sample_method="array", which returns cylinder_geom=None, so we capture the
@@ -240,6 +263,7 @@ def main():
             sample_method="array",
             samples=accumulated,             # method='array' takes explicit coords
             cylinder_geom_override=cylinder_geom,  # shell/face RMSE + momentum force here too
+            solver=shared_solver,
         )
         result["cylinder_geom"] = cylinder_geom   # keep geometry available downstream
         if PLOTS:
@@ -263,7 +287,7 @@ def main():
             print(f"[main] accumulated training points: {len(accumulated)}")
             result = run_gpr(
                 **COMMON, sample_method="array", samples=accumulated,
-                cylinder_geom_override=cylinder_geom)
+                cylinder_geom_override=cylinder_geom, solver=shared_solver)
             result["cylinder_geom"] = cylinder_geom
             if PLOTS:
                 save_all(result, out_dir="plots", phase_label="phase_topcap",

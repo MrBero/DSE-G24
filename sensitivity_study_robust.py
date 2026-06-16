@@ -1,10 +1,32 @@
 
 import os
+
+# ---------------------------------------------------------------------------
+# Thread budget (set BEFORE numpy/JAX/BLAS import so they honor it).
+# 7800X3D = 8 physical cores / 16 SMT threads. With many independent
+# (config, seed) jobs the work is embarrassingly parallel ACROSS jobs, so
+# throughput comes from running many serial workers, not from threading each
+# one. We pin each worker to THREADS_PER_WORKER and run MAX_WORKERS of them.
+#   8 workers x 1 thread  = 8 (one per physical core)  <- default, best for sweeps
+#   4 workers x 2 threads = 8                            <- try if single runs feel slow
+# These env vars cap NumPy's BLAS (OpenBLAS/MKL), OpenMP, and JAX/XLA. Julia is
+# pinned separately via JULIA_NUM_THREADS (the FP.jl subprocess inherits it).
+THREADS_PER_WORKER = 1
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "JULIA_NUM_THREADS"):
+    os.environ.setdefault(_v, str(THREADS_PER_WORKER))
+# Keep XLA single-threaded per worker too (JAX is forced onto CPU in GPR.py).
+os.environ.setdefault(
+    "XLA_FLAGS",
+    f"--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads={THREADS_PER_WORKER}")
+
 import gc
 import numpy as np
 import matplotlib.pyplot as plt
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import trimesh
+from flowpanelwrapper import FLOWPanelSolver
 from GPR import run_gpr
 from adaptive import propose_adaptive_points
 
@@ -42,18 +64,18 @@ MOMENTUM_FORCE = np.array([155433.0, 214609.0, 72586.0])
 # Run knobs
 # ---------------------------------------------------------------------------
 import random
-def generate_seeds(n=24, min_gap=5, lo=0, hi=100000, rng_seed=None):
+def generate_seeds(n=18, min_gap=7, lo=0, hi=100000, rng_seed=None):
     rng = random.Random(rng_seed)
     slots = (hi - lo) // min_gap + 1
     if slots < n:
         raise ValueError("range too small for n seeds at this spacing")
     chosen = rng.sample(range(slots), n)        # distinct slot indices
     return sorted(lo + s * min_gap for s in chosen)
-# SEEDS = generate_seeds(rng_seed=42)
-# print(SEEDS)
-SEEDS = [7, 42, 67, 420, 1234, 15, 4321, 1324, 4213, 3, 696, 6767, 89403, 132, 432, 594, 6794, 9999]
-MAX_WORKERS = 6
-PLOT_DIR = "plots_forces"
+SEEDS = generate_seeds(rng_seed=67)
+print(SEEDS)
+# SEEDS = [7, 42, 67, 420]#, 1234, 15, 4321, 1324, 4213, 3, 696, 6767, 89403, 132, 432, 594]
+MAX_WORKERS = 8   # 8 workers x 1 thread each = 8 physical cores (see THREADS_PER_WORKER)
+PLOT_DIR = "plots_robust"
 BAND = 0.05                          # +-5% acceptance band drawn on plots
 
 # Defaults applied to EVERY config unless the config overrides them.
@@ -70,7 +92,7 @@ BASE_INITIAL = dict(
 
 BASE_ADAPTIVE = dict(
     w_var=0.2, w_grad=0.4, w_vort=0.4,
-    pool_size=4000, resample_size=600, score_beta=2.0,
+    pool_size=4000, resample_size=600, score_beta=4.0,
     shell_thick_in=0.20, shell_thick_out=0.20,
     front_frac=0.5, front_half_angle_deg=60.0,
     frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
@@ -110,12 +132,28 @@ def cfg(name, init_overrides=None, adaptive_overrides=None,
 # The configs to compare. Each runs over all SEEDS.
 # ---------------------------------------------------------------------------
 CONFIGS = [
-    # cfg("score_beta=2.0", adaptive_overrides=adapt_over(score_beta=2.0)),
-    # cfg("score_beta=0.0", adaptive_overrides=adapt_over(score_beta=0.0)),
-    cfg("beta=2.0, fd=1.0", adaptive_overrides=adapt_over(score_beta=2.0)),
-    cfg("beta=4.0, fd=1.0", adaptive_overrides=adapt_over(score_beta=4.0)),
-    cfg("beta=2.0, fd=auto", adaptive_overrides=adapt_over(score_beta=2.0, fd_step=None)),
-    cfg("beta=4.0, fd=auto", adaptive_overrides=adapt_over(score_beta=4.0, fd_step=None)),    
+    cfg("baseline"),
+
+    cfg("r=0.9", init_overrides=init_over(r_factor=0.9)),
+    cfg("r=1.5 (thick inner)", init_overrides=init_over(r_factor=1.5),
+        adaptive_overrides=adapt_over(shell_thick_in=0.50,
+                                      frac_region1=0.55, frac_region2=0.30,
+                                      frac_region3=0.15)),
+    # height of the cylinder
+    cfg("h=1.2", init_overrides=init_over(h_factor=1.2)),
+
+    # wake bias of the adaptive shell: less biased (more uniform azimuth)
+    cfg("front_frac=0.3", adaptive_overrides=adapt_over(front_frac=0.3)),
+
+    # shell thickness: thicker shell both ways (more radial spread of samples)
+    cfg("thick shell", adaptive_overrides=adapt_over(shell_thick_in=0.35,
+                                                     shell_thick_out=0.35)),
+
+    # region budget: even split across the three radial bands instead of
+    # face-heavy 70/15/15
+    cfg("regions even", adaptive_overrides=adapt_over(frac_region1=0.34,
+                                                      frac_region2=0.33,
+                                                      frac_region3=0.33)),
 ]
 
 
@@ -128,7 +166,7 @@ def _make_initial(init_overrides, n_per_phase, seed):
     sc = init["sample_config"]
     sc.update(init_overrides)
     sc["n_points"] = init_overrides.get("n_points", n_per_phase)
-    sc["top_cap_frac"] = max(20.0 / max(n_per_phase, 1), 0.20)
+    sc["top_cap_frac"] = max(20.0 / max(n_per_phase, 1), 0.20) # NOTE HERE!!!
     sc["seed"] = seed
     return init
 
@@ -162,7 +200,24 @@ def run_one(name, init_overrides, adaptive_overrides, n_per_phase, n_phases, see
     initial = _make_initial(init_overrides, n_per_phase, seed)
     adaptive_cfg = _make_adaptive(adaptive_overrides, n_per_phase, seed)
 
-    result = run_gpr(**COMMON, **initial)
+    # One Julia solver per job, reused across this job's phases (mesh + v_inf are
+    # constant across all configs/seeds). Saves the per-phase Julia cold start.
+    _mesh = trimesh.load_mesh(COMMON["stl_filepath"])
+    if COMMON["stl_scale"] != 1.0:
+        _mesh.apply_scale(COMMON["stl_scale"])
+    solver = FLOWPanelSolver(_mesh, COMMON["v_inf"], julia_script="FP.jl",
+                             julia_bin="julia", verbose=False)
+    try:
+        return _run_one_impl(name, initial, adaptive_cfg, n_phases, seed, solver)
+    finally:
+        try:
+            solver.close()
+        except Exception:
+            pass
+
+
+def _run_one_impl(name, initial, adaptive_cfg, n_phases, seed, solver):
+    result = run_gpr(**COMMON, **initial, solver=solver)
     cyl = result.get("cylinder_geom")
     if cyl is None:
         raise RuntimeError(f"[{name}/{seed}] phase 0 produced no cylinder_geom.")
@@ -192,7 +247,8 @@ def run_one(name, init_overrides, adaptive_overrides, n_per_phase, n_phases, see
         gc.collect()
 
         result = run_gpr(**COMMON, sample_method="array",
-                         samples=accumulated, cylinder_geom_override=cyl)
+                         samples=accumulated, cylinder_geom_override=cyl,
+                         solver=solver)
         curve.append((len(accumulated), result["metrics"].get("force_vec")))
         fv = result["metrics"].get("force_vec")
         if fv is not None:

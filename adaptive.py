@@ -227,7 +227,7 @@ def _fd_steps(ell, fd_step):
     """
     ell = np.asarray(ell, float).reshape(-1)
     if fd_step is None:
-        h = np.clip(0.1 * ell, 0.5, 10.0)
+        h = np.clip(0.08 * ell, 0.5, 10.0)
     elif np.isscalar(fd_step):
         h = np.full(3, float(fd_step))
     else:

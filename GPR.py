@@ -368,7 +368,13 @@ def run_gpr(
     momentum_include_bottom=False,
     momentum_bpa_L=10.0,
     momentum_midpoint=None,
-    momentum_show_plot=False):
+    momentum_show_plot=False,
+    solver=None):
+    # solver: an optional, already-constructed FLOWPanelSolver to REUSE across
+    # calls (e.g. across adaptive phases that share one (mesh, v_inf)). When
+    # provided, run_gpr does NOT build a new Julia process and does NOT close
+    # this one (the caller owns its lifetime). When None (default), behavior is
+    # unchanged: a fresh solver is built here and closed via _close_solver.
 
     v_inf = np.asarray(v_inf, dtype=float)
 
@@ -389,8 +395,15 @@ def run_gpr(
             stl_mesh.apply_transform(rot_matrix)
 
         # --- Panel solver (prior) ---
-        solver = FLOWPanelSolver(stl_mesh, v_inf, julia_script="FP.jl",
-                                julia_bin="julia", verbose=False)
+        # Reuse a caller-supplied solver when given (shared across phases); else
+        # build a fresh one as before. _owns_solver controls whether we are
+        # allowed to close it at the end of this run.
+        if solver is None:
+            solver = FLOWPanelSolver(stl_mesh, v_inf, julia_script="FP.jl",
+                                    julia_bin="julia", verbose=False)
+            _owns_solver = True
+        else:
+            _owns_solver = False
         bar()
 
         bar.text('Sampling...')
@@ -723,7 +736,11 @@ def run_gpr(
     _result["_chol_c"] = c
     _result["_chol_low"] = low
 
-    def _close_solver(_s=solver):
+    def _close_solver(_s=solver, _own=_owns_solver):
+        # Only close solvers this run actually created. A borrowed (shared)
+        # solver is owned by the caller and must outlive this run.
+        if not _own:
+            return
         try:
             _s.close()
         except Exception:
