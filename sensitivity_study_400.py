@@ -64,7 +64,7 @@ MOMENTUM_FORCE = np.array([155433.0, 214609.0, 72586.0])
 # Run knobs
 # ---------------------------------------------------------------------------
 import random
-def generate_seeds(n=8, min_gap=7, lo=0, hi=100000, rng_seed=None):
+def generate_seeds(n=4, min_gap=7, lo=0, hi=100000, rng_seed=None):
     rng = random.Random(rng_seed)
     slots = (hi - lo) // min_gap + 1
     if slots < n:
@@ -75,24 +75,24 @@ SEEDS = generate_seeds(rng_seed=67)
 print(SEEDS)
 # SEEDS = [7, 42, 67, 420]#, 1234, 15, 4321, 1324, 4213, 3, 696, 6767, 89403, 132, 432, 594]
 MAX_WORKERS = 4   # 8 workers x 1 thread each = 8 physical cores (see THREADS_PER_WORKER)
-PLOT_DIR = "plots_robust"
+PLOT_DIR = "plots_400"
 BAND = 0.05                          # +-5% acceptance band drawn on plots
 
 # Defaults applied to EVERY config unless the config overrides them.
-DEFAULT_N_PER_PHASE = 100
-DEFAULT_N_PHASES = 4                 # phase 0 + (N_PHASES-1) adaptive phases
+DEFAULT_N_PER_PHASE = 80
+DEFAULT_N_PHASES = 2                 # phase 0 + (N_PHASES-1) adaptive phases
 
 # Base initial cylinder + base adaptive config (matches the other studies).
 BASE_INITIAL = dict(
     sample_method="cylinder",
     sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
                    "front_frac": 0.25, "front_half_angle_deg": 45.0,
-                   "top_cap": True, "top_cap_frac": 0.2},
+                   "top_cap": False, "top_cap_frac": 0.2},
 )
 
 BASE_ADAPTIVE = dict(
     w_var=0.2, w_grad=0.4, w_vort=0.4,
-    pool_size=4000, resample_size=600, score_beta=4.0,
+    pool_size=5000, resample_size=800, score_beta=0.0,
     shell_thick_in=0.20, shell_thick_out=0.20,
     front_frac=0.5, front_half_angle_deg=60.0,
     frac_region1=0.70, frac_region2=0.15, frac_region3=0.15,
@@ -132,28 +132,13 @@ def cfg(name, init_overrides=None, adaptive_overrides=None,
 # The configs to compare. Each runs over all SEEDS.
 # ---------------------------------------------------------------------------
 CONFIGS = [
-    cfg("baseline"),
-
-    cfg("r=1.0", init_overrides=init_over(r_factor=0.9)),
-    cfg("r=1.5 (thick inner)", init_overrides=init_over(r_factor=1.5),
-        adaptive_overrides=adapt_over(shell_thick_in=0.50,
-                                      frac_region1=0.55, frac_region2=0.30,
-                                      frac_region3=0.15)),
-    # height of the cylinder
-    cfg("h=1.2", init_overrides=init_over(h_factor=1.2)),
-
-    # wake bias of the adaptive shell: less biased (more uniform azimuth)
-    cfg("front_frac=0.3", adaptive_overrides=adapt_over(front_frac=0.3)),
-
-    # shell thickness: thicker shell both ways (more radial spread of samples)
-    cfg("thick shell", adaptive_overrides=adapt_over(shell_thick_in=0.35,
-                                                     shell_thick_out=0.35)),
-
-    # region budget: even split across the three radial bands instead of
-    # face-heavy 70/15/15
-    cfg("regions even", adaptive_overrides=adapt_over(frac_region1=0.34,
-                                                      frac_region2=0.33,
-                                                      frac_region3=0.33)),
+        cfg("80",  n_per_phase=80),
+        cfg("160",  n_per_phase=160),
+        cfg("240",  n_per_phase=240),
+        cfg("320",  n_per_phase=320),
+        cfg("400",  n_per_phase=400),
+        cfg("480",  n_per_phase=480),
+        cfg("560",  n_per_phase=560),
 ]
 
 
@@ -165,8 +150,7 @@ def _make_initial(init_overrides, n_per_phase, seed):
             for k, v in BASE_INITIAL.items()}
     sc = init["sample_config"]
     sc.update(init_overrides)
-    sc["n_points"] = init_overrides.get("n_points", n_per_phase)
-    sc["top_cap_frac"] = max(20.0 / max(n_per_phase, 1), 0.20) # NOTE HERE!!!
+    sc["n_points"] = init_overrides.get("n_points", 1)
     sc["seed"] = seed
     return init
 

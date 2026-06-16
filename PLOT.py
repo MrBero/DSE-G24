@@ -408,6 +408,103 @@ def plot_slice_triptych(result, z_slice_target=2.5, component=None,
     return fig
 
 
+def plot_slice_quad(result, z_slice_target=2.5, component=None,
+                    field_vlim=None, diff_vlim=None, show_cylinder=True):
+    """2x2 panel at a z-slice: top row CFD truth and potential-flow prior, bottom
+    row GPR posterior and (posterior - CFD) difference.
+
+    A sibling of plot_slice_triptych that also shows the prior mean, so the
+    posterior can be read against both the truth and the baseline it started
+    from. Same house style and scale logic: the three field panels (CFD, prior,
+    posterior) share one colour scale, the difference panel has its own symmetric
+    scale, and the cylinder integration ring is drawn only on the difference
+    panel.
+
+    component / field_vlim / diff_vlim / show_cylinder: as in plot_slice_triptych.
+    Returns None if the prior field (result["means_tests"]) is unavailable.
+    """
+    if result.get("means_tests") is None:
+        return None
+
+    res = result["res"]
+    bounds = result["bounds"]
+    test_points = np.asarray(result["test_points"])
+    verts = np.asarray(result["mesh_vertices"])
+
+    P = test_points.reshape(res, res, res, 3)
+    prior_U = np.asarray(result["means_tests"]).reshape(res, res, res, 3)
+    post_U = np.asarray(result["GPR_posterior"]).reshape(res, res, res, 3)
+    cfd_U = np.asarray(result["cfd_test_vels"]).reshape(res, res, res, 3)
+
+    z_grid = np.linspace(bounds[2, 0], bounds[2, 1], res)
+    k = _slice_index(z_grid, z_slice_target)
+    z_here = z_grid[k]
+
+    Xs = P[:, :, k, 0]
+    Ys = P[:, :, k, 1]
+
+    def _field(U):
+        return _velocity_magnitude(U[:, :, k, :]) if component is None \
+            else U[:, :, k, component]
+
+    cfd_f = _field(cfd_U)
+    prior_f = _field(prior_U)
+    post_f = _field(post_U)
+    diff = post_f - cfd_f
+
+    slice_tol = 0.5 * abs(z_grid[1] - z_grid[0]) if res > 1 else 1e-6
+    near_slice = np.abs(verts[:, 2] - z_here) <= slice_tol
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
+
+    # shared field scale spans CFD, prior and posterior (or symmetric if signed)
+    field_cmap = "viridis" if component is None else "coolwarm"
+    if field_vlim is not None:
+        f_vmin, f_vmax = float(field_vlim[0]), float(field_vlim[1])
+    elif component is None:
+        f_vmin = float(np.nanmin([cfd_f, prior_f, post_f]))
+        f_vmax = float(np.nanmax([cfd_f, prior_f, post_f]))
+    else:
+        f_lim = float(np.nanmax(np.abs([cfd_f, prior_f, post_f])))
+        f_vmin, f_vmax = -f_lim, f_lim
+    field_levels = _safe_levels(f_vmin, f_vmax)
+
+    # difference scale: caller-supplied shared limit, else auto symmetric max-abs
+    if diff_vlim is not None:
+        d_lim = float(max(abs(diff_vlim[0]), abs(diff_vlim[1])))
+    else:
+        abs_diff = np.abs(diff[np.isfinite(diff)])
+        d_lim = float(np.nanmax(abs_diff)) if abs_diff.size else 1.0
+    if d_lim <= 0:
+        d_lim = 1.0
+    diff_levels = _safe_levels(-d_lim, d_lim)
+
+    clab = "|u|" if component is None else ["u", "v", "w"][component]
+    diff_ax = axs[1, 1]
+    plot_items = [
+        (axs[0, 0], cfd_f, f"CFD truth {clab}", field_cmap, field_levels),
+        (axs[0, 1], prior_f, f"Prior {clab}", field_cmap, field_levels),
+        (axs[1, 0], post_f, f"Posterior {clab}", field_cmap, field_levels),
+        (diff_ax, diff, f"Posterior - CFD {clab}", "coolwarm", diff_levels),
+    ]
+
+    ring = _cylinder_ring_at_z(result, z_here) if show_cylinder else None
+
+    for ax, field, title, cmap, levels in plot_items:
+        pc = _safe_contourf(ax, Xs, Ys, field, levels=levels, cmap=cmap, extend="both")
+        fig.colorbar(pc, ax=ax)
+        if near_slice.any():
+            ax.scatter(verts[near_slice, 0], verts[near_slice, 1], c="black", s=8)
+        if ax is diff_ax:                     # ring only on the difference panel
+            _draw_ring(ax, ring)
+        ax.set_aspect("equal")
+        ax.set_title(f"{title}, z={z_here:.4g}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+
+    return fig
+
+
 def plot_multi_slices(result, n_slices=5, field="posterior", axis="z",
                       slice_range=(0.1, 6.5), vlim=None):
     """Grid of |u| slices across several planes along the chosen axis.
@@ -637,6 +734,9 @@ def plot_all(result, z_slice_target=2.5, n_slices=5, show=True):
         plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z", slice_range=(1,75)),
         plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z", slice_range=(1,75))
     ]
+    pq = plot_slice_quad(result, z_slice_target)
+    if pq is not None:
+        figs.append(pq)
     pt = plot_pressure_triptych(result, z_slice_target)
     if pt is not None:
         figs.append(pt)
@@ -686,6 +786,9 @@ def save_all(result, out_dir="plots", phase_label="phase0",
         plot_multi_slices(result, n_slices=n_slices, field="posterior", axis="z", slice_range=(1, 75)),
         plot_multi_slices(result, n_slices=n_slices, field="variances", axis="z", slice_range=(1, 75), vlim=var_vlim),
     ]
+    pq = plot_slice_quad(result, z_slice_target, field_vlim=field_vlim, diff_vlim=diff_vlim)
+    if pq is not None:
+        figs.append(pq)
     pt = plot_pressure_triptych(result, z_slice_target,
                                 field_vlim=press_vlim, diff_vlim=press_diff_vlim)
     if pt is not None:
