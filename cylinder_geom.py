@@ -83,7 +83,7 @@ def generate_square_momentum_integration_mesh(
 		return dx, dy
  
 	# Half-segment shift (analogous to dtheta/2 in the cylinder) for staggering
-	half_shift = 0.5
+	half_shift = 0.0
  
 	alphas   = np.linspace(0.0, 1.0, Z + 1)
 	cx_rings = cx_b + alphas * (cx_t - cx_b)
@@ -155,31 +155,20 @@ def generate_square_momentum_integration_mesh(
 		"""Global index of ring i, perimeter position j (wraps)."""
 		return i * P + (j % P)
  
-	# ------------------------------------------------------------------
-	# 4. Lateral faces (staggered triangles, same logic as cylinder)
+# ------------------------------------------------------------------
+	# 4. Lateral faces (straight quads split into 2 triangles each)
 	# ------------------------------------------------------------------
 	faces = []
- 
+
 	for i in range(Z):
-		if i % 2 == 0:
-			for j in range(P):
-				j_next = (j + 1) % P
-				a = lat_idx(i,     j)
-				b = lat_idx(i,     j_next)
-				c = lat_idx(i + 1, j)
-				d = lat_idx(i + 1, j_next)
-				faces.extend([3, a, b, c])
-				faces.extend([3, c, b, d])
-		else:
-			for j in range(P):
-				j_next = (j + 1) % P
-				a = lat_idx(i,     j)
-				b = lat_idx(i,     j_next)
-				c = lat_idx(i + 1, j)
-				d = lat_idx(i + 1, j_next)
-				faces.extend([3, a, b, d])
-				faces.extend([3, c, a, d])
- 
+		for j in range(P):
+			j_next = (j + 1) % P
+			a = lat_idx(i,     j)
+			b = lat_idx(i,     j_next)
+			c = lat_idx(i + 1, j)
+			d = lat_idx(i + 1, j_next)
+			faces.extend([3, a, b, d])
+			faces.extend([3, a, d, c]) 
 	# ------------------------------------------------------------------
 	# 5. Cap faces
 	# For each cap we use a Delaunay triangulation of the perimeter ring
@@ -226,6 +215,15 @@ def generate_square_momentum_integration_mesh(
 	return pv.PolyData(all_pts, np.array(faces, dtype=np.int_))
 
 
+import numpy as np
+import pyvista as pv
+
+try:
+	import triangle as tr
+except ImportError:
+	tr = None
+
+
 def generate_momentum_integration_mesh(
 	center_bot: np.ndarray,
 	center_top: np.ndarray,
@@ -235,7 +233,8 @@ def generate_momentum_integration_mesh(
 	cap_top: bool = False,
 ) -> pv.PolyData:
 	"""
-	Build an oblique cylinder: horizontal flat caps, slanted triangulated wall.
+	Build an oblique cylinder: horizontal flat caps (golden-angle distributed,
+	constrained Delaunay triangulated), slanted triangulated wall.
 	"""
 	center_bot = np.asarray(center_bot, dtype=float)
 	center_top = np.asarray(center_top, dtype=float)
@@ -253,13 +252,13 @@ def generate_momentum_integration_mesh(
 
 	s = np.sqrt(total_area / total_points)
 
-	T           = max(4, round(2 * np.pi * radius / s))
-	Z           = max(1, round(axis_length / s))
-	cap_r_res   = max(1, round(radius / s))
+	T         = max(4, round(2 * np.pi * radius / s))
+	Z         = max(1, round(axis_length / s))
+	cap_r_res = max(1, round(radius / s))  # kept for reference / fallback
 
 	thetas = np.linspace(0, 2 * np.pi, T, endpoint=False)
 	dtheta = 2 * np.pi / T
-	
+
 	# Apply half-step shift to odd rings to stagger points
 	shifts = (np.arange(Z + 1) % 2) * (dtheta / 2.0)
 	thetas_2d = thetas[None, :] + shifts[:, None]
@@ -285,58 +284,88 @@ def generate_momentum_integration_mesh(
 	n_lat = lat_pts.shape[0]
 
 	# ------------------------------------------------------------------
-	# 2. Cap interior vertices
+	# 2. Cap interior vertices (golden-angle / Vogel spiral)
 	# ------------------------------------------------------------------
-	cap_radii = radius * np.arange(cap_r_res - 1, 0, -1) / cap_r_res
-	
-	def make_cap_pts(cx, cy, z, shift):
-		pts = []
-		if cap_r_res > 1:
-			cap_thetas = thetas + shift
-			c_t = np.cos(cap_thetas)
-			s_t = np.sin(cap_thetas)
-			for r_c in cap_radii:
-				xs = cx + r_c * c_t
-				ys = cy + r_c * s_t
-				zs = np.full(T, z)
-				pts.append(np.stack([xs, ys, zs], axis=1))
-		pts.append(np.array([[cx, cy, z]]))
-		return np.vstack(pts)
+	GOLDEN_ANGLE = np.pi * (3.0 - np.sqrt(5.0))  # ~2.39996 rad
 
-	all_pts_list = [lat_pts]
-	bot_cap_offset = None
-	top_cap_offset = None
+	def n_interior_for_cap():
+		# total cap area minus rim "ring" area, divided by point footprint s^2
+		n_est = round(cap_area / (s ** 2)) - T
+		return max(0, n_est)
 
-	if cap_bottom:
-		bot_cap_pts    = make_cap_pts(cx_b, cy_b, z_bottom, shifts[0])
-		bot_cap_offset = n_lat
-		all_pts_list.append(bot_cap_pts)
+	def make_cap_interior_pts(cx, cy, z, n_interior):
+		if n_interior <= 0:
+			return np.empty((0, 3))
+		k = np.arange(n_interior)
+		# shrink slightly so interior points stay strictly inside the rim
+		r = 0.97 * radius * np.sqrt((k + 0.5) / n_interior)
+		theta = k * GOLDEN_ANGLE
+		xs = cx + r * np.cos(theta)
+		ys = cy + r * np.sin(theta)
+		zs = np.full(n_interior, z)
+		return np.stack([xs, ys, zs], axis=1)
 
-	if cap_top:
-		top_cap_pts    = make_cap_pts(cx_t, cy_t, z_top, shifts[-1])
-		top_cap_offset = n_lat + (bot_cap_pts.shape[0] if cap_bottom else 0)
-		all_pts_list.append(top_cap_pts)
+	def build_cap(lat_ring_i, cx, cy, z, inward):
+		"""
+		Returns (interior_pts, faces) for one cap.
+		faces reference global indices: rim points use lat_idx(lat_ring_i, j),
+		interior points use a temporary local index offset applied after concat.
+		"""
+		n_interior = n_interior_for_cap()
+		interior_pts = make_cap_interior_pts(cx, cy, z, n_interior)
 
-	all_pts = np.vstack(all_pts_list)
+		# local 2D coords for triangulation: rim (T points) + interior
+		rim_2d = np.stack(
+			[cx + radius * np.cos(thetas + shifts[lat_ring_i]),
+			 cy + radius * np.sin(thetas + shifts[lat_ring_i])],
+			axis=1,
+		)
+		if n_interior > 0:
+			interior_2d = interior_pts[:, :2]
+			all_2d = np.vstack([rim_2d, interior_2d])
+		else:
+			all_2d = rim_2d
+
+		n_local = all_2d.shape[0]
+
+		if tr is not None:
+			# Constrained Delaunay: force rim edges to be present
+			segments = np.array(
+				[[i, (i + 1) % T] for i in range(T)], dtype=np.int_
+			)
+			cdt_input = {"vertices": all_2d, "segments": segments}
+			cdt_out = tr.triangulate(cdt_input, "p")
+			simplices = cdt_out["triangles"]
+			# 'triangle' may insert Steiner points (rare with -p only, but guard anyway)
+			if cdt_out["vertices"].shape[0] != n_local:
+				raise RuntimeError(
+					"Constrained triangulation inserted extra points; "
+					"adjust input point distribution."
+				)
+		else:
+			# Fallback: plain Delaunay (rim connectivity not guaranteed)
+			from scipy.spatial import Delaunay
+			simplices = Delaunay(all_2d).simplices
+
+		def local_to_global(idx, interior_offset):
+			if idx < T:
+				return lat_idx(lat_ring_i, idx)
+			return interior_offset + (idx - T)
+
+		return interior_pts, simplices
 
 	# ------------------------------------------------------------------
-	# 3. Index helpers
+	# 3. Index helper for lateral ring
 	# ------------------------------------------------------------------
 	def lat_idx(i, j):
 		return i * T + (j % T)
 
-	def cap_ring_idx(offset, ring, j):
-		return offset + ring * T + (j % T)
-
-	def cap_centre_idx(offset):
-		return offset + (cap_r_res - 1) * T
-
-	# ------------------------------------------------------------------
-	# 4. Faces
-	# ------------------------------------------------------------------
+	all_pts_list = [lat_pts]
 	faces = []
 
-	# Lateral staggered triangles
+	# ------------------------------------------------------------------
+	# 4. Lateral staggered triangles
+	# ------------------------------------------------------------------
 	for i in range(Z):
 		if i % 2 == 0:
 			# Lower ring unshifted, upper ring shifted (+0.5 dtheta)
@@ -359,50 +388,35 @@ def generate_momentum_integration_mesh(
 				faces.extend([3, a, b, d])
 				faces.extend([3, c, a, d])
 
-	# Cap faces completely triangulated
-	def add_cap_faces(lat_ring_i, offset, inward):
-		centre = cap_centre_idx(offset)
-		if cap_r_res >= 2:
-			for j in range(T):
-				j_next = (j + 1) % T
-				a = lat_idx(lat_ring_i, j)
-				b = lat_idx(lat_ring_i, j_next)
-				c = cap_ring_idx(offset, 0, j_next)
-				d = cap_ring_idx(offset, 0, j)
-				if inward:
-					faces.extend([3, a, d, c, 3, a, c, b])
-				else:
-					faces.extend([3, a, b, c, 3, a, c, d])
+	# ------------------------------------------------------------------
+	# 5. Cap faces (golden-angle interior, constrained Delaunay)
+	# ------------------------------------------------------------------
+	def add_cap(lat_ring_i, cx, cy, z, inward):
+		nonlocal_offset = sum(p.shape[0] for p in all_pts_list)  # current point count
 
-			for ring in range(cap_r_res - 2):
-				for j in range(T):
-					j_next = (j + 1) % T
-					a = cap_ring_idx(offset, ring,     j)
-					b = cap_ring_idx(offset, ring,     j_next)
-					c = cap_ring_idx(offset, ring + 1, j_next)
-					d = cap_ring_idx(offset, ring + 1, j)
-					if inward:
-						faces.extend([3, a, d, c, 3, a, c, b])
-					else:
-						faces.extend([3, a, b, c, 3, a, c, d])
+		interior_pts, simplices = build_cap(lat_ring_i, cx, cy, z, inward)
 
-			inner = cap_r_res - 2
-			for j in range(T):
-				j_next = (j + 1) % T
-				a = cap_ring_idx(offset, inner, j)
-				b = cap_ring_idx(offset, inner, j_next)
-				faces.extend([3, a, centre, b] if inward else [3, a, b, centre])
-		else:
-			for j in range(T):
-				j_next = (j + 1) % T
-				a = lat_idx(lat_ring_i, j)
-				b = lat_idx(lat_ring_i, j_next)
-				faces.extend([3, a, centre, b] if inward else [3, a, b, centre])
+		if interior_pts.shape[0] > 0:
+			all_pts_list.append(interior_pts)
+
+		def local_to_global(idx):
+			if idx < T:
+				return lat_idx(lat_ring_i, idx)
+			return nonlocal_offset + (idx - T)
+
+		for simplex in simplices:
+			a, b, c = (local_to_global(i) for i in simplex)
+			if inward:
+				faces.extend([3, a, c, b])
+			else:
+				faces.extend([3, a, b, c])
 
 	if cap_bottom:
-		add_cap_faces(0, bot_cap_offset, inward=True)
+		add_cap(0, cx_b, cy_b, z_bottom, inward=True)
 	if cap_top:
-		add_cap_faces(Z, top_cap_offset, inward=False)
+		add_cap(Z, cx_t, cy_t, z_top, inward=False)
+
+	all_pts = np.vstack(all_pts_list)
 
 	return pv.PolyData(all_pts, np.array(faces, dtype=np.int_))
 

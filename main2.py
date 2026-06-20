@@ -442,15 +442,24 @@ def main():
 	)
 
 	# ------------------------------------------------------------------
-	# Calculate baseline physical dimensions using factors (one time)
+	# Calculate baseline physical dimensions using factors
 	# ------------------------------------------------------------------
+	r_factor = 1.2
+	h_factor = 1.5
+
+	# r_factor was calibrated for radius=52.6, but actual radius is 50.86418181965501/2
+	actual_radius = 50.86418181965501 / 2
+	calibration_radius = 52.6
+	r_factor_corrected = r_factor * (calibration_radius/actual_radius)
+
 	bot_base, top_base, radius_base = calculate_wake_cylinder_parameters(
-		ctx.stl_mesh, r_factor=2.4, h_factor=1.4, v_inf=env.v_inf, tilt_deg=10.0
+		ctx.stl_mesh, r_factor=r_factor_corrected, h_factor=h_factor, v_inf=env.v_inf, tilt_deg=10.0
 	)
+
 	height_base = float(np.linalg.norm(top_base - bot_base))
 
 	# ------------------------------------------------------------------
-	# 2. Define the baseline hyperparameter configuration
+	# 2. Define the study configuration
 	# ------------------------------------------------------------------
 	base_study = StudyConfig(
 		rho=1.225,
@@ -461,13 +470,7 @@ def main():
 		n_top=76,
 		depth=0.0
 	)
-	
-	results: list[ForceResult] = []
 
-	# ------------------------------------------------------------------
-	# Example A: convergence study over drone density
-	# ------------------------------------------------------------------
-	# Build the static geometry context for the density sweep
 	cyl = build_cylinder_ctx(
 		radius=base_study.radius,
 		height=base_study.height,
@@ -476,71 +479,27 @@ def main():
 		tilt_deg=base_study.tilt_deg,
 	)
 
-	for n in [100, 200, 324, 500]:
-		print(f"\n--- Convergence run: n_drones_side={n} ---")
-		
-		run_config = replace(base_study, n_side=n)
-		
-		pts = generate_drone_points(
-			cyl, 
-			n_side=run_config.n_side, 
-			n_top=run_config.n_top, 
-			depth=run_config.depth
-		)
-		
-		fit = fit_gpr_to_samples(
-			ctx, drone_pts=pts,
-			extra_tags={"study": "drone_density", "drone_depth": run_config.depth, "rho": run_config.rho}
-		)
-		
-		result = evaluate_force(
-			setup_ctx=ctx, 
-			cylinder_ctx=cyl, 
-			fit_result=fit,
-			air_density=run_config.rho,
-		)
-		results.append(result)
+	# ------------------------------------------------------------------
+	# Load fixed drone sampling points
+	# ------------------------------------------------------------------
+	pts = np.load(r"inputs/accumulated_points.npy")
 
 	# ------------------------------------------------------------------
-	# Example B: Absolute Radius sweep
+	# Run the pipeline once
 	# ------------------------------------------------------------------
-	# We sweep absolute radius directly, generating new physical centers each time
-	for r_abs in [40.0, 45.0, 50.0, 55.0]:
-		print(f"\n--- Radius sweep: Radius={r_abs}m ---")
-		
-		run_config = replace(base_study, radius=r_abs)
-		
-		# (Optional) If your helper calculates centers based on radius, use it here.
-		# Assuming bot_base and top_base remain fixed for a pure radius sweep:
-		cyl_r = build_cylinder_ctx(
-			radius=run_config.radius,
-			height=run_config.height,
-			center_bot=bot_base,
-			center_top=top_base,
-			tilt_deg=run_config.tilt_deg,
-		)
-		
-		pts = generate_drone_points(
-			cyl_r, 
-			n_side=run_config.n_side, 
-			n_top=run_config.n_top, 
-			depth=run_config.depth
-		)
-		
-		fit = fit_gpr_to_samples(
-			ctx, drone_pts=pts,
-			extra_tags={"study": "radius_sweep", "rho": run_config.rho}
-		)
-		
-		result = evaluate_force(
-			setup_ctx=ctx, 
-			cylinder_ctx=cyl_r, 
-			fit_result=fit,
-			air_density=run_config.rho,
-		)
-		results.append(result)
+	fit = fit_gpr_to_samples(
+		ctx, drone_pts=pts,
+		extra_tags={"study": "single_run", "drone_depth": base_study.depth, "rho": base_study.rho}
+	)
 
-	df = results_to_dataframe(results)
+	result = evaluate_force(
+		setup_ctx=ctx,
+		cylinder_ctx=cyl,
+		fit_result=fit,
+		air_density=base_study.rho,
+	)
+
+	df = results_to_dataframe([result])
 	print("\n=== Results ===")
 	print(df.to_string(index=False))
 	df.to_csv("results.csv", index=False)
@@ -548,14 +507,13 @@ def main():
 
 	print(f"\n=== Total pipeline time: {_fmt(time.perf_counter() - total_start)} ===")
 
-	last = results[-1]
 	ctx.solver.close()
 
 	visualize(
-		mom_mesh=last.cylinder_ctx.mom_mesh,
+		mom_mesh=result.cylinder_ctx.mom_mesh,
 		stl_mesh=ctx.stl_mesh,
-		drone_pts=last.fit.drone_pts,
-		drone_vels=last.fit.drone_vels,
+		drone_pts=result.fit.drone_pts,
+		drone_vels=result.fit.drone_vels,
 		show=True,
 	)
 

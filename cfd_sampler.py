@@ -1,38 +1,52 @@
-import numpy as np
-import pandas as pd
-from scipy.spatial import cKDTree
-import joblib
-import hashlib
+from __future__ import annotations
 import os
-import pyvista as pv
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-PKL_PATH   = r"inputs/csv_with_everything.pkl"
-CACHE_PATH = r"inputs/cfd_sampler_cache.joblib"
-N_POINTS   = 4
-SHARPNESS  = 2.0
-# ---------------------------------------------------------------------------
-# Sampler
-# ---------------------------------------------------------------------------
-def _df_hash(df: pd.DataFrame) -> str:
-	"""Quick hash of the dataframe contents to detect if source data changed."""
-	return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values).hexdigest()
+from dataclasses import dataclass
+
+import numpy as np
+import joblib
+from scipy.spatial import cKDTree
 
 
-def build_cfd_sampler(df: pd.DataFrame, n_points: int = 8, sharpness: float = 2.0,
+@dataclass
+class CFDFields:
+	"""
+	Readable container for interpolated CFD fields.
+
+	All arrays are shape (N, ...) and correspond row-for-row to the
+	query points passed into the sampler.
+	"""
+	velocity: np.ndarray         # (N, 3) -- [vx, vy, vz]
+	pressure: np.ndarray         # (N,)
+	turb_kin_energy: np.ndarray  # (N,)  -- k
+	turb_visc: np.ndarray        # (N,)  -- mu_t
+
+	def stacked(self) -> np.ndarray:
+		"""Return the old-style (N, 6) array: [vx, vy, vz, p, k, mu_t]."""
+		return np.column_stack([
+			self.velocity, self.pressure, self.turb_kin_energy, self.turb_visc,
+		])
+
+
+def build_cfd_sampler(df, n_points: int = 8, sharpness: float = 2.0,
 					  cache_path: str = None):
 	"""
 	Build (or load from cache) a fast IDW sampler from a CFD dataframe.
 	Parameters
 	----------
-	df         : DataFrame with columns x/y/z-coordinate, x/y/z-velocity, pressure
+	df         : DataFrame with columns x/y/z-coordinate, x/y/z-velocity,
+				 pressure, turb-kinetic-energy, viscosity-turb
 	n_points   : number of nearest neighbours used for IDW interpolation
 	sharpness  : IDW distance-weight exponent (higher = sharper falloff)
 	cache_path : optional path to cache the cKDTree and fields to disk
 	"""
 	coords = df[['x-coordinate', 'y-coordinate', 'z-coordinate']].to_numpy(dtype=float)
-	fields = df[['x-velocity', 'y-velocity', 'z-velocity', 'pressure']].to_numpy(dtype=float)
+	fields = df[[
+		'x-velocity', 'y-velocity', 'z-velocity',
+		'pressure',
+		'turb-kinetic-energy',
+		'viscosity-turb',
+	]].to_numpy(dtype=float)
+
 	# Try loading from cache
 	if cache_path and os.path.exists(cache_path):
 		print("Loading sampler from cache...")
@@ -46,6 +60,7 @@ def build_cfd_sampler(df: pd.DataFrame, n_points: int = 8, sharpness: float = 2.
 			cache = None
 	else:
 		cache = None
+
 	# Build fresh if no valid cache
 	if cache is None:
 		print("Building cKDTree...")
@@ -53,41 +68,50 @@ def build_cfd_sampler(df: pd.DataFrame, n_points: int = 8, sharpness: float = 2.
 		if cache_path:
 			joblib.dump({'hash': _df_hash(df), 'tree': tree, 'fields': fields}, cache_path)
 			print(f"Cache saved to {cache_path}")
+
 	# Warm up process pool
 	tree.query(coords[:1], k=n_points, workers=-1)
-	def sample(points_or_x, y=None, z=None) -> np.ndarray:
+
+	def sample(points_or_x, y=None, z=None) -> CFDFields:
 		"""
-		Interpolate velocity and pressure at arbitrary query points via IDW.
+		Interpolate velocity, pressure, turbulent kinetic energy and
+		turbulent viscosity at arbitrary query points via IDW.
+
 		Parameters
 		----------
 		points_or_x : (N, 3) array-like  e.g. [[0,0,0], [1,2,3]]
 					  or 1-D x array when y and z are passed separately
 		y, z        : 1-D arrays, required when passing coordinates separately
+
 		Returns
 		-------
-		np.ndarray of shape (N, 4) -- columns: [vx, vy, vz, pressure]
+		CFDFields  -- dataclass with .velocity (N,3), .pressure (N,),
+					  .turb_kin_energy (N,), .turb_visc (N,)
 		"""
 		pts = np.asarray(points_or_x, dtype=float)
 		if pts.ndim == 1 and y is not None:
 			query_pts = np.column_stack([pts, np.asarray(y, float), np.asarray(z, float)])
 		else:
 			query_pts = pts if pts.ndim == 2 else pts.reshape(1, 3)
+
 		dists, idx = tree.query(query_pts, k=n_points, workers=-1)
+		if n_points == 1:
+			dists = dists[:, None]
+			idx = idx[:, None]
+
 		exact = dists[:, 0] == 0.0
 		weights = 1.0 / np.where(dists == 0.0, 1.0, dists) ** sharpness
 		weights[exact] = 0.0
 		weights[exact, 0] = 1.0
 		weights /= weights.sum(axis=1, keepdims=True)
-		return np.einsum('qk,qkf->qf', weights, fields[idx])
+
+		out = np.einsum('qk,qkf->qf', weights, fields[idx])
+
+		return CFDFields(
+			velocity=out[:, 0:3],
+			pressure=out[:, 3],
+			turb_kin_energy=out[:, 4],
+			turb_visc=out[:, 5],
+		)
+
 	return sample
-
-
-# ---------------------------------------------------------------------------
-# Example
-# ---------------------------------------------------------------------------
-if __name__ == '__main__':
-	df = pd.read_pickle(PKL_PATH)
-	sample = build_cfd_sampler(df, n_points=N_POINTS, sharpness=SHARPNESS, cache_path=CACHE_PATH)
-	out = sample([[1, 2, 1], [5, 2, 1], [-50, 2, 1]])
-	print("result:\n", out)
-
