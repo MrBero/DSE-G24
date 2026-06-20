@@ -1,7 +1,7 @@
 from GPR import run_gpr
 from PLOT import (plot_all, save_all, plot_force_convergence,
                   triptych_field_vlim, multi_slice_vlim, pressure_triptych_vlim,
-                  plot_variance_across_phases)
+                  plot_variance_across_phases, plot_adaptive_slice_triptych)
 from adaptive import propose_adaptive_points, propose_top_cap_points
 import numpy as np
 import trimesh
@@ -21,13 +21,13 @@ COMMON = dict(
     posterior_batch=100,
     compute_variance=True,
     var_res=50,
-    grid_eval=False,
+    grid_eval=True,
 )
 
 # initial sampling: tilted cylinder (gives us cylinder_geom for the adaptive regions)
 INITIAL_SAMPLING = dict(
     sample_method="cylinder",
-    sample_config={"r_factor": 1.0, "h_factor": 1.5, "tilt_deg": 10,
+    sample_config={"r_factor": 1.2, "h_factor": 1.5, "tilt_deg": 10,
                    "n_points": 100, "front_frac": 0.25, "front_half_angle_deg": 45,
                    "top_cap": True, "top_cap_frac": 0.2},
 )
@@ -50,7 +50,7 @@ ADAPTIVE_CFG = dict(
     # difficulty score (computed on the existing res^3 grid via np.gradient)
     w_var=0.2, w_grad=0.4, w_vort=0.4,   # favor gradient + vorticity
     # weighted-LHS candidate pool over the thick tilted cylinder shell
-    pool_size=4000, resample_size=600, score_beta=4.0,
+    pool_size=4000, resample_size=600, score_beta=2.0,
     shell_thick_in=0.20, shell_thick_out=0.20,   # shell spans 0.7R .. 1.3R
     front_frac=0.5, front_half_angle_deg=60.0,   # bias toward the wake side
     # per-phase budget (mostly on-cylinder)
@@ -249,6 +249,37 @@ def _main_impl(shared_solver):
         if len(new_pts) == 0:
             print("[main] no new points proposed - stopping early.")
             break
+
+        # overlay figure: the just-completed phase's reconstruction with the
+        # points it already has near the slice, plus the drones about to be added.
+        # Built BEFORE _free_heavy strips results[-1]'s grid arrays.
+        if PLOTS:
+            fig = plot_adaptive_slice_triptych(
+                results[-1], new_pts, z_slice_target=25, z_band=5.0,
+                field_vlim=FIELD_VLIM, diff_vlim=DIFF_VLIM,
+                accumulated_coords=accumulated)
+            fig.savefig(f"plots/png/adaptive_overlay_phase{phase-1}_z{25}.png",
+                        facecolor=fig.get_facecolor(), dpi=200)
+            import matplotlib.pyplot as _plt; _plt.close(fig)
+
+            fig = plot_adaptive_slice_triptych(
+                results[-1], new_pts, z_slice_target=15, z_band=5.0,
+                field_vlim=FIELD_VLIM, diff_vlim=DIFF_VLIM,
+                accumulated_coords=accumulated)
+            fig.savefig(f"plots/png/adaptive_overlay_phase{phase-1}_z{15}.png",
+                        facecolor=fig.get_facecolor(), dpi=200)
+            import matplotlib.pyplot as _plt; _plt.close(fig)
+
+            fig = plot_adaptive_slice_triptych(
+                results[-1], new_pts, z_slice_target=35, z_band=5.0,
+                field_vlim=FIELD_VLIM, diff_vlim=DIFF_VLIM,
+                accumulated_coords=accumulated)
+            fig.savefig(f"plots/png/adaptive_overlay_phase{phase-1}_z{35}.png",
+                        facecolor=fig.get_facecolor(), dpi=200)
+            import matplotlib.pyplot as _plt; _plt.close(fig)
+
+            print(f"saved adaptive-overlay triptych -> "
+                  f"plots/png/adaptive_overlay_phase{phase-1}.png")
 
         accumulated = np.vstack([accumulated, new_pts])
         print(f"[main] accumulated training points: {len(accumulated)}")

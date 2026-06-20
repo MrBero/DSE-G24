@@ -408,6 +408,128 @@ def plot_slice_triptych(result, z_slice_target=2.5, component=None,
     return fig
 
 
+def plot_adaptive_slice_triptych(result, next_points, z_slice_target=2.5,
+                                 component=None, field_vlim=None, diff_vlim=None,
+                                 show_cylinder=True, z_band=5.0,
+                                 accumulated_coords=None):
+    """1x3 panel (CFD / posterior / posterior - CFD) at a z-slice, with the drone
+    layout for this phase overlaid on the posterior and difference panels only.
+
+    Two point sets are scattered, in two colours:
+      * accumulated points already flown up to and including this phase, that lie
+        within +-z_band of the slice plane (the "current" sampling near the
+        slice), drawn in one colour;
+      * next_points - the adaptive drones that will be ADDED in the next phase,
+        again filtered to +-z_band of the slice, drawn in a second colour.
+
+    The CFD-truth panel is left clean (no scatter) so the truth field reads on its
+    own; the points sit on the reconstruction and on its error, which is where
+    they are diagnostic.
+
+    result:             a phase result dict (needs the res^3 grid fields, i.e. a
+                        grid_eval run), same as plot_slice_triptych.
+    next_points:        (M,3) array of the drones proposed for the NEXT phase
+                        (propose_adaptive_points output). Pass an empty array or
+                        None on the final phase to draw only the accumulated set.
+    accumulated_coords: (N,3) of all points flown up to this phase. Defaults to
+                        result["training_coords"] when None, which is already the
+                        accumulated set in the main loop.
+    z_band:             half-thickness (m) of the slab around the slice plane that
+                        a point must fall in to be drawn (z +- z_band).
+    component / field_vlim / diff_vlim / show_cylinder: as in plot_slice_triptych.
+    """
+    res = result["res"]
+    bounds = result["bounds"]
+    test_points = np.asarray(result["test_points"])
+
+    if accumulated_coords is None:
+        accumulated_coords = result["training_coords"]
+    acc = np.asarray(accumulated_coords, float).reshape(-1, 3)
+    nxt = (np.asarray(next_points, float).reshape(-1, 3)
+           if next_points is not None and len(next_points) else
+           np.empty((0, 3)))
+
+    P = test_points.reshape(res, res, res, 3)
+    post_U = np.asarray(result["GPR_posterior"]).reshape(res, res, res, 3)
+    cfd_U = np.asarray(result["cfd_test_vels"]).reshape(res, res, res, 3)
+
+    z_grid = np.linspace(bounds[2, 0], bounds[2, 1], res)
+    k = _slice_index(z_grid, z_slice_target)
+    z_here = z_grid[k]
+
+    Xs = P[:, :, k, 0]
+    Ys = P[:, :, k, 1]
+
+    def _field(U):
+        return _velocity_magnitude(U[:, :, k, :]) if component is None \
+            else U[:, :, k, component]
+
+    cfd_f = _field(cfd_U)
+    post_f = _field(post_U)
+    diff = post_f - cfd_f
+
+    # points within the +-z_band slab around the slice plane
+    acc_near = acc[np.abs(acc[:, 2] - z_here) <= z_band] if acc.size else acc
+    nxt_near = nxt[np.abs(nxt[:, 2] - z_here) <= z_band] if nxt.size else nxt
+
+    fig, axs = plt.subplots(1, 3, figsize=(18, 5.2), constrained_layout=True)
+
+    field_cmap = "viridis" if component is None else "coolwarm"
+    if field_vlim is not None:
+        f_vmin, f_vmax = float(field_vlim[0]), float(field_vlim[1])
+    elif component is None:
+        f_vmin = float(np.nanmin([cfd_f, post_f]))
+        f_vmax = float(np.nanmax([cfd_f, post_f]))
+    else:
+        f_lim = float(np.nanmax(np.abs([cfd_f, post_f])))
+        f_vmin, f_vmax = -f_lim, f_lim
+    field_levels = _safe_levels(f_vmin, f_vmax)
+
+    if diff_vlim is not None:
+        d_lim = float(max(abs(diff_vlim[0]), abs(diff_vlim[1])))
+    else:
+        abs_diff = np.abs(diff[np.isfinite(diff)])
+        d_lim = float(np.nanmax(abs_diff)) if abs_diff.size else 1.0
+    if d_lim <= 0:
+        d_lim = 1.0
+    diff_levels = _safe_levels(-d_lim, d_lim)
+
+    clab = "|u|" if component is None else ["u", "v", "w"][component]
+    plot_items = [
+        (axs[0], cfd_f, f"CFD truth {clab}", field_cmap, field_levels, False),
+        (axs[1], post_f, f"Posterior {clab}", field_cmap, field_levels, True),
+        (axs[2], diff, f"Posterior - CFD {clab}", "coolwarm", diff_levels, True),
+    ]
+
+    ring = _cylinder_ring_at_z(result, z_here) if show_cylinder else None
+
+    acc_color = "#1f9c5b"     # current accumulated drones near the slice
+    nxt_color = "#ff3b3b"     # adaptive drones added next phase
+
+    for ax, field, title, cmap, levels, with_points in plot_items:
+        pc = _safe_contourf(ax, Xs, Ys, field, levels=levels, cmap=cmap, extend="both")
+        fig.colorbar(pc, ax=ax)
+        if with_points:
+            if acc_near.size:
+                ax.scatter(acc_near[:, 0], acc_near[:, 1], c=acc_color, s=26,
+                           edgecolors="black", linewidths=0.5, zorder=5,
+                           label=f"accumulated (|z-{z_here:.0f}|<={z_band:g})")
+            if nxt_near.size:
+                ax.scatter(nxt_near[:, 0], nxt_near[:, 1], c=nxt_color, s=34,
+                           marker="^", edgecolors="black", linewidths=0.5,
+                           zorder=6, label="added next phase")
+            if ax is axs[2]:
+                _draw_ring(ax, ring)
+            if acc_near.size or nxt_near.size:
+                ax.legend(loc="upper right", fontsize=8, framealpha=0.6)
+        ax.set_aspect("equal")
+        ax.set_title(f"{title}, z={z_here:.4g}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+
+    return fig
+
+
 def plot_slice_quad(result, z_slice_target=2.5, component=None,
                     field_vlim=None, diff_vlim=None, show_cylinder=True):
     """2x2 panel at a z-slice: top row CFD truth and potential-flow prior, bottom
