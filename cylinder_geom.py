@@ -1,656 +1,339 @@
-from scipy.spatial import ConvexHull
+"""
+cylinder_geom.py
+----------------
+Cylinder geometry for the wind-force pipeline:
+
+    calculate_wake_cylinder_parameters   -- fit a tilted cylinder around a building
+    generate_cylindrical_sampling_coordinates  -- drone / GPR training points on the surface
+    generate_momentum_integration_mesh   -- fine triangulated surface for force integration
+    visualize_points                     -- quick point-cloud preview
+"""
+
+from __future__ import annotations
+import numpy as np
+import pyvista as pv
+from scipy.spatial import ConvexHull, Delaunay
 from scipy.spatial.distance import cdist
-import numpy as np
-import pyvista as pv
-
-def generate_square_momentum_integration_mesh(
-	center_bot: np.ndarray,
-	center_top: np.ndarray,
-	radius: float,
-	total_points: int = 100_000,
-	cap_bottom: bool = False,
-	cap_top: bool = False,
-) -> pv.PolyData:
-	"""
-	Build an oblique cuboid: horizontal flat square caps, slanted triangulated walls.
- 
-	The square cross-section has side length = radius * 2, so `radius` is the
-	half-side length. Points are distributed to match roughly the requested
-	total_points density across all active surfaces.
-	"""
-	center_bot = np.asarray(center_bot, dtype=float)
-	center_top = np.asarray(center_top, dtype=float)
- 
-	cx_b, cy_b, z_bottom = center_bot
-	cx_t, cy_t, z_top    = center_top
- 
-	axis_vec    = center_top - center_bot
-	axis_length = float(np.linalg.norm(axis_vec))
- 
-	# half-side: radius*2 is the full side length
-	half = radius
- 
-	# ------------------------------------------------------------------
-	# Surface area budget to derive grid spacing s
-	# ------------------------------------------------------------------
-	n_caps       = int(cap_top) + int(cap_bottom)
-	lateral_area = 4 * (2 * half) * axis_length   # 4 rectangular faces
-	cap_area     = (2 * half) ** 2                 # square cap
-	total_area   = lateral_area + n_caps * cap_area
- 
-	s = np.sqrt(total_area / total_points)
- 
-	# Segments along axis and along one edge of the square perimeter
-	Z = max(1, round(axis_length / s))
-	E = max(2, round((2 * half) / s))   # segments per edge
- 
-	# Total perimeter samples: 4 edges * E points, no duplicate corners
-	# We index perimeter as 4*E points going around the square
-	P = 4 * E
- 
-	# ------------------------------------------------------------------
-	# Build perimeter offsets for one ring at unit square [-half, half]^2
-	# Corner order: bottom-left -> bottom-right -> top-right -> top-left
-	#   edge 0: bottom  y=-half, x from -half to +half  (E pts, skip last)
-	#   edge 1: right   x=+half, y from -half to +half  (E pts, skip last)
-	#   edge 2: top     y=+half, x from +half to -half  (E pts, skip last)
-	#   edge 3: left    x=-half, y from +half to -half  (E pts, skip last)
-	# ------------------------------------------------------------------
-	def make_perimeter_offsets(shift_frac: float = 0.0):
-		"""Return (dx, dy) arrays of shape (P,) around the square perimeter.
-		shift_frac in [0, 1) offsets all points by that fraction of one segment."""
-		t_edge = np.linspace(0.0, 1.0, E, endpoint=False)  # (E,)
-		t_edge = (t_edge + shift_frac / E) % 1.0
- 
-		# edge 0: bottom  y=-half, x = -half + t*2*half
-		dx0 = -half + t_edge * 2 * half
-		dy0 = np.full(E, -half)
- 
-		# edge 1: right   x=+half, y = -half + t*2*half
-		dx1 = np.full(E, half)
-		dy1 = -half + t_edge * 2 * half
- 
-		# edge 2: top     y=+half, x = half - t*2*half
-		dx2 = half - t_edge * 2 * half
-		dy2 = np.full(E, half)
- 
-		# edge 3: left    x=-half, y = half - t*2*half
-		dx3 = np.full(E, -half)
-		dy3 = half - t_edge * 2 * half
- 
-		dx = np.concatenate([dx0, dx1, dx2, dx3])
-		dy = np.concatenate([dy0, dy1, dy2, dy3])
-		return dx, dy
- 
-	# Half-segment shift (analogous to dtheta/2 in the cylinder) for staggering
-	half_shift = 0.0
- 
-	alphas   = np.linspace(0.0, 1.0, Z + 1)
-	cx_rings = cx_b + alphas * (cx_t - cx_b)
-	cy_rings = cy_b + alphas * (cy_t - cy_b)
-	z_rings  = z_bottom + alphas * (z_top - z_bottom)
- 
-	# Stagger: odd rings are shifted by half a segment
-	shifts = (np.arange(Z + 1) % 2) * half_shift  # (Z+1,)
- 
-	# ------------------------------------------------------------------
-	# 1. Lateral surface vertices
-	# ------------------------------------------------------------------
-	lat_pts_list = []
-	for i in range(Z + 1):
-		dx, dy = make_perimeter_offsets(shifts[i])
-		xs = cx_rings[i] + dx
-		ys = cy_rings[i] + dy
-		zs = np.full(P, z_rings[i])
-		lat_pts_list.append(np.stack([xs, ys, zs], axis=1))
- 
-	lat_pts = np.vstack(lat_pts_list)   # shape: ((Z+1)*P, 3)
-	n_lat   = lat_pts.shape[0]
- 
-	# ------------------------------------------------------------------
-	# 2. Cap interior vertices (grid inside the square)
-	# ------------------------------------------------------------------
-	# Use a regular grid for cap interior, spacing ~s
-	cap_n = max(2, round(2 * half / s))  # grid lines per axis (including edges)
- 
-	def make_cap_pts(cx, cy, z):
-		"""Fill the interior of the square cap with a regular grid,
-		excluding the perimeter points (those are the lateral ring)."""
-		ts = np.linspace(-half, half, cap_n + 1)
-		# Interior only: skip first and last (those live on the lateral ring)
-		ts_inner = ts[1:-1]
-		if ts_inner.size == 0:
-			# No interior; just the centre point
-			return np.array([[cx, cy, z]])
-		gx, gy = np.meshgrid(ts_inner, ts_inner)
-		xs = cx + gx.ravel()
-		ys = cy + gy.ravel()
-		zs = np.full(xs.size, z)
-		# Add centre explicitly to ensure it's present
-		interior = np.stack([xs, ys, zs], axis=1)
-		return interior
- 
-	all_pts_list    = [lat_pts]
-	bot_cap_offset  = None
-	top_cap_offset  = None
-	bot_cap_pts     = None
-	top_cap_pts     = None
- 
-	if cap_bottom:
-		bot_cap_pts    = make_cap_pts(cx_b, cy_b, z_bottom)
-		bot_cap_offset = n_lat
-		all_pts_list.append(bot_cap_pts)
- 
-	if cap_top:
-		top_cap_pts    = make_cap_pts(cx_t, cy_t, z_top)
-		top_cap_offset = n_lat + (bot_cap_pts.shape[0] if cap_bottom else 0)
-		all_pts_list.append(top_cap_pts)
- 
-	all_pts = np.vstack(all_pts_list)
- 
-	# ------------------------------------------------------------------
-	# 3. Index helpers
-	# ------------------------------------------------------------------
-	def lat_idx(i, j):
-		"""Global index of ring i, perimeter position j (wraps)."""
-		return i * P + (j % P)
- 
-# ------------------------------------------------------------------
-	# 4. Lateral faces (straight quads split into 2 triangles each)
-	# ------------------------------------------------------------------
-	faces = []
-
-	for i in range(Z):
-		for j in range(P):
-			j_next = (j + 1) % P
-			a = lat_idx(i,     j)
-			b = lat_idx(i,     j_next)
-			c = lat_idx(i + 1, j)
-			d = lat_idx(i + 1, j_next)
-			faces.extend([3, a, b, d])
-			faces.extend([3, a, d, c]) 
-	# ------------------------------------------------------------------
-	# 5. Cap faces
-	# For each cap we use a Delaunay triangulation of the perimeter ring
-	# plus interior grid points projected to 2-D, so the connectivity is
-	# correct regardless of interior density.
-	# ------------------------------------------------------------------
-	def add_cap_faces_delaunay(lat_ring_i, cap_offset, cap_n_pts, inward):
-		"""
-		Triangulate the cap using a 2-D Delaunay (via pyvista/scipy) of
-		the perimeter ring + interior points, then map back to global indices.
-		"""
-		from scipy.spatial import Delaunay
- 
-		# Collect 2-D positions of perimeter ring (ring lat_ring_i)
-		perim_global = [lat_idx(lat_ring_i, j) for j in range(P)]
-		perim_xy     = all_pts[perim_global, :2]   # (P, 2) - use x,y for 2D
- 
-		# Interior points
-		if cap_n_pts > 0:
-			interior_global = list(range(cap_offset, cap_offset + cap_n_pts))
-			interior_xy     = all_pts[interior_global, :2]
-			all_local_xy    = np.vstack([perim_xy, interior_xy])
-			all_global_idx  = perim_global + interior_global
-		else:
-			all_local_xy   = perim_xy
-			all_global_idx = perim_global
- 
-		tri = Delaunay(all_local_xy)
-		for simplex in tri.simplices:
-			a, b, c = all_global_idx[simplex[0]], all_global_idx[simplex[1]], all_global_idx[simplex[2]]
-			if inward:
-				faces.extend([3, a, c, b])
-			else:
-				faces.extend([3, a, b, c])
- 
-	if cap_bottom:
-		n_bot = bot_cap_pts.shape[0]
-		add_cap_faces_delaunay(0, bot_cap_offset, n_bot, inward=True)
- 
-	if cap_top:
-		n_top = top_cap_pts.shape[0]
-		add_cap_faces_delaunay(Z, top_cap_offset, n_top, inward=False)
- 
-	return pv.PolyData(all_pts, np.array(faces, dtype=np.int_))
-
-
-import numpy as np
-import pyvista as pv
 
 try:
-	import triangle as tr
+    import triangle as tr
 except ImportError:
-	tr = None
+    tr = None
+
+GOLDEN_ANGLE = np.pi * (3.0 - np.sqrt(5.0))   # ~2.3999 rad  (Vogel spiral)
 
 
-def generate_momentum_integration_mesh(
-	center_bot: np.ndarray,
-	center_top: np.ndarray,
-	radius: float,
-	total_points: int = 100_000,
-	cap_bottom: bool = False,
-	cap_top: bool = False,
-) -> pv.PolyData:
-	"""
-	Build an oblique cylinder: horizontal flat caps (golden-angle distributed,
-	constrained Delaunay triangulated), slanted triangulated wall.
-	"""
-	center_bot = np.asarray(center_bot, dtype=float)
-	center_top = np.asarray(center_top, dtype=float)
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-	cx_b, cy_b, z_bottom = center_bot
-	cx_t, cy_t, z_top    = center_top
+def calculate_wake_cylinder_parameters(stl_mesh, r_factor, h_factor, v_inf,
+                                       tilt_deg=0.0):
+    """
+    Fit a tilted cylinder that fully encloses a building and extends into its wake.
 
-	axis_vec    = center_top - center_bot
-	axis_length = float(np.linalg.norm(axis_vec))
+    The cylinder axis leans downstream (in the v_inf direction) with height,
+    controlled by tilt_deg.  Raises ValueError if the building sticks out.
 
-	n_caps       = int(cap_top) + int(cap_bottom)
-	lateral_area = 2 * np.pi * radius * axis_length
-	cap_area     = np.pi * radius ** 2
-	total_area   = lateral_area + n_caps * cap_area
+    Parameters
+    ----------
+    stl_mesh  : trimesh.Trimesh  (already scaled to metres)
+    r_factor  : float  radius = r_factor × footprint circumradius
+    h_factor  : float  height = h_factor × building height
+    v_inf     : (3,)   free-stream velocity vector
+    tilt_deg  : float  downstream wake tilt in degrees
 
-	s = np.sqrt(total_area / total_points)
+    Returns
+    -------
+    center_bot, center_top : (3,) arrays
+    radius                 : float
+    """
+    verts = np.asarray(stl_mesh.vertices)
 
-	T         = max(4, round(2 * np.pi * radius / s))
-	Z         = max(1, round(axis_length / s))
-	cap_r_res = max(1, round(radius / s))  # kept for reference / fallback
+    # Horizontal wind direction (for tilt axis)
+    v_xy = np.array([v_inf[0], v_inf[1], 0.0], dtype=float)
+    norm = np.linalg.norm(v_xy)
+    if norm < 1e-12:
+        raise ValueError("v_inf has no horizontal component.")
+    v_xy /= norm
 
-	thetas = np.linspace(0, 2 * np.pi, T, endpoint=False)
-	dtheta = 2 * np.pi / T
+    # Smallest enclosing circle of the building footprint
+    xy = np.unique(verts[:, :2], axis=0)
+    hull_xy = xy[ConvexHull(xy).vertices]
+    footprint_r = 0.5 * cdist(hull_xy, hull_xy).max()
+    radius = r_factor * footprint_r
 
-	# Apply half-step shift to odd rings to stagger points
-	shifts = (np.arange(Z + 1) % 2) * (dtheta / 2.0)
-	thetas_2d = thetas[None, :] + shifts[:, None]
+    # Vertical extents and cylinder dimensions
+    z_bot = verts[:, 2].min()
+    z_top = verts[:, 2].max()
+    z_mid = 0.5 * (z_bot + z_top)
+    height = h_factor * (z_top - z_bot)
 
-	cos_t_2d = np.cos(thetas_2d)
-	sin_t_2d = np.sin(thetas_2d)
+    # XY centre of bounding box
+    xy_ctr = np.array([
+        0.5 * (verts[:, 0].min() + verts[:, 0].max()),
+        0.5 * (verts[:, 1].min() + verts[:, 1].max()),
+    ])
 
-	# ------------------------------------------------------------------
-	# 1. Lateral surface vertices
-	# ------------------------------------------------------------------
-	alphas   = np.linspace(0.0, 1.0, Z + 1)
-	cx_rings = cx_b + alphas * (cx_t - cx_b)
-	cy_rings = cy_b + alphas * (cy_t - cy_b)
-	z_rings  = z_bottom + alphas * (z_top - z_bottom)
+    tilt = np.tan(np.radians(tilt_deg))
 
-	lat_x = cx_rings[:, None] + radius * cos_t_2d
-	lat_y = cy_rings[:, None] + radius * sin_t_2d
-	lat_z = np.tile(z_rings[:, None], (1, T))
+    def ring_center(z):
+        offset = xy_ctr + tilt * (z - z_mid) * v_xy[:2]
+        return np.append(offset, z)
 
-	lat_pts = np.stack(
-		[lat_x.ravel(), lat_y.ravel(), lat_z.ravel()], axis=1
-	)
-	n_lat = lat_pts.shape[0]
+    c_bot = ring_center(z_bot)
+    c_top = ring_center(z_bot + height)
 
-	# ------------------------------------------------------------------
-	# 2. Cap interior vertices (golden-angle / Vogel spiral)
-	# ------------------------------------------------------------------
-	GOLDEN_ANGLE = np.pi * (3.0 - np.sqrt(5.0))  # ~2.39996 rad
+    # Validate: every building vertex must be inside the cylinder
+    axis  = c_top - c_bot
+    axis2 = np.dot(axis, axis)
+    diff  = verts - c_bot
+    t     = np.clip((diff @ axis) / axis2, 0.0, 1.0)
+    closest = c_bot + t[:, None] * axis
+    r_dist  = np.linalg.norm(verts - closest, axis=1)
+    t_full  = (diff @ axis) / axis2           # unclipped, for range check
+    outside = (r_dist > radius) & (t_full >= 0.0) & (t_full <= 1.0)
+    if outside.any():
+        raise ValueError(
+            f"{outside.sum()} building vertices lie outside the cylinder. "
+            f"Increase r_factor ({r_factor}) or h_factor ({h_factor})."
+        )
 
-	def n_interior_for_cap():
-		# total cap area minus rim "ring" area, divided by point footprint s^2
-		n_est = round(cap_area / (s ** 2)) - T
-		return max(0, n_est)
-
-	def make_cap_interior_pts(cx, cy, z, n_interior):
-		if n_interior <= 0:
-			return np.empty((0, 3))
-		k = np.arange(n_interior)
-		# shrink slightly so interior points stay strictly inside the rim
-		r = 0.97 * radius * np.sqrt((k + 0.5) / n_interior)
-		theta = k * GOLDEN_ANGLE
-		xs = cx + r * np.cos(theta)
-		ys = cy + r * np.sin(theta)
-		zs = np.full(n_interior, z)
-		return np.stack([xs, ys, zs], axis=1)
-
-	def build_cap(lat_ring_i, cx, cy, z, inward):
-		"""
-		Returns (interior_pts, faces) for one cap.
-		faces reference global indices: rim points use lat_idx(lat_ring_i, j),
-		interior points use a temporary local index offset applied after concat.
-		"""
-		n_interior = n_interior_for_cap()
-		interior_pts = make_cap_interior_pts(cx, cy, z, n_interior)
-
-		# local 2D coords for triangulation: rim (T points) + interior
-		rim_2d = np.stack(
-			[cx + radius * np.cos(thetas + shifts[lat_ring_i]),
-			 cy + radius * np.sin(thetas + shifts[lat_ring_i])],
-			axis=1,
-		)
-		if n_interior > 0:
-			interior_2d = interior_pts[:, :2]
-			all_2d = np.vstack([rim_2d, interior_2d])
-		else:
-			all_2d = rim_2d
-
-		n_local = all_2d.shape[0]
-
-		if tr is not None:
-			# Constrained Delaunay: force rim edges to be present
-			segments = np.array(
-				[[i, (i + 1) % T] for i in range(T)], dtype=np.int_
-			)
-			cdt_input = {"vertices": all_2d, "segments": segments}
-			cdt_out = tr.triangulate(cdt_input, "p")
-			simplices = cdt_out["triangles"]
-			# 'triangle' may insert Steiner points (rare with -p only, but guard anyway)
-			if cdt_out["vertices"].shape[0] != n_local:
-				raise RuntimeError(
-					"Constrained triangulation inserted extra points; "
-					"adjust input point distribution."
-				)
-		else:
-			# Fallback: plain Delaunay (rim connectivity not guaranteed)
-			from scipy.spatial import Delaunay
-			simplices = Delaunay(all_2d).simplices
-
-		def local_to_global(idx, interior_offset):
-			if idx < T:
-				return lat_idx(lat_ring_i, idx)
-			return interior_offset + (idx - T)
-
-		return interior_pts, simplices
-
-	# ------------------------------------------------------------------
-	# 3. Index helper for lateral ring
-	# ------------------------------------------------------------------
-	def lat_idx(i, j):
-		return i * T + (j % T)
-
-	all_pts_list = [lat_pts]
-	faces = []
-
-	# ------------------------------------------------------------------
-	# 4. Lateral staggered triangles
-	# ------------------------------------------------------------------
-	for i in range(Z):
-		if i % 2 == 0:
-			# Lower ring unshifted, upper ring shifted (+0.5 dtheta)
-			for j in range(T):
-				j_next = (j + 1) % T
-				a = lat_idx(i, j)
-				b = lat_idx(i, j_next)
-				c = lat_idx(i + 1, j)
-				d = lat_idx(i + 1, j_next)
-				faces.extend([3, a, b, c])
-				faces.extend([3, c, b, d])
-		else:
-			# Lower ring shifted (+0.5 dtheta), upper ring unshifted
-			for j in range(T):
-				j_next = (j + 1) % T
-				a = lat_idx(i, j)
-				b = lat_idx(i, j_next)
-				c = lat_idx(i + 1, j)
-				d = lat_idx(i + 1, j_next)
-				faces.extend([3, a, b, d])
-				faces.extend([3, c, a, d])
-
-	# ------------------------------------------------------------------
-	# 5. Cap faces (golden-angle interior, constrained Delaunay)
-	# ------------------------------------------------------------------
-	def add_cap(lat_ring_i, cx, cy, z, inward):
-		nonlocal_offset = sum(p.shape[0] for p in all_pts_list)  # current point count
-
-		interior_pts, simplices = build_cap(lat_ring_i, cx, cy, z, inward)
-
-		if interior_pts.shape[0] > 0:
-			all_pts_list.append(interior_pts)
-
-		def local_to_global(idx):
-			if idx < T:
-				return lat_idx(lat_ring_i, idx)
-			return nonlocal_offset + (idx - T)
-
-		for simplex in simplices:
-			a, b, c = (local_to_global(i) for i in simplex)
-			if inward:
-				faces.extend([3, a, c, b])
-			else:
-				faces.extend([3, a, b, c])
-
-	if cap_bottom:
-		add_cap(0, cx_b, cy_b, z_bottom, inward=True)
-	if cap_top:
-		add_cap(Z, cx_t, cy_t, z_top, inward=False)
-
-	all_pts = np.vstack(all_pts_list)
-
-	return pv.PolyData(all_pts, np.array(faces, dtype=np.int_))
+    return c_bot, c_top, radius
 
 
 def generate_cylindrical_sampling_coordinates(
-	center_bot: np.ndarray,
-	center_top: np.ndarray,
-	radius: float,
-	z_clearance: float = 0.1,
-	side_points: int = 0,
-	top_points: int = 0,
-	bot_points: int = 0,
+    center_bot, center_top, radius,
+    z_clearance=0.1,
+    side_points=0,
+    top_points=0,
+    bot_points=0,
 ) -> np.ndarray:
-	PHI          = (1 + np.sqrt(5)) / 2
-	GOLDEN_ANGLE = 2 * np.pi * (1 - 1 / PHI)
+    """
+    Sampling points (drone locations) on / near the cylinder surface.
 
-	center_bot = np.asarray(center_bot, dtype=float)
-	center_top = np.asarray(center_top, dtype=float)
+    Side points use a golden-angle spiral along the axis so they are
+    quasi-uniformly distributed.  Cap points use a Vogel disk.
 
-	axis_vec  = center_top - center_bot
-	axis_unit = axis_vec / np.linalg.norm(axis_vec)
+    Parameters
+    ----------
+    center_bot, center_top : (3,) cylinder axis endpoints
+    radius      : float
+    z_clearance : vertical gap between the bottom cap and the first side point
+    side_points : number of points on the cylindrical wall
+    top_points  : number of points on the top cap
+    bot_points  : number of points on the bottom cap
 
-	# Shift the bottom center along the axis vector so that the z component
-	# of the shift equals z_clearance. This preserves the oblique angle.
-	z_shift_along_axis = z_clearance / axis_unit[2]
-	center_bot_shifted = center_bot + axis_unit * z_shift_along_axis
+    Returns
+    -------
+    (N, 3) array  where N = side_points + top_points + bot_points
+    """
+    c_bot = np.asarray(center_bot, dtype=float)
+    c_top = np.asarray(center_top, dtype=float)
+    axis  = c_top - c_bot
+    axis_unit = axis / np.linalg.norm(axis)
 
-	cx_b, cy_b, z_bottom = center_bot_shifted
-	cx_t, cy_t, z_top    = center_top
+    # Shift bottom up by z_clearance along the (oblique) axis
+    dz_frac = z_clearance / axis_unit[2]
+    c_bot_shifted = c_bot + axis_unit * dz_frac
 
-	all_pts_list = []
+    parts = []
 
-	# --- Lateral (side) surface sampling ---
-	if side_points > 0:
-		i      = np.arange(side_points)
-		alphas = i / (side_points - 1) if side_points > 1 else np.array([0.5])
-		thetas = i * GOLDEN_ANGLE
+    if side_points > 0:
+        i      = np.arange(side_points)
+        alpha  = i / (side_points - 1) if side_points > 1 else np.array([0.5])
+        theta  = i * GOLDEN_ANGLE
+        cx = c_bot_shifted[0] + alpha * (c_top[0] - c_bot_shifted[0])
+        cy = c_bot_shifted[1] + alpha * (c_top[1] - c_bot_shifted[1])
+        cz = c_bot_shifted[2] + alpha * (c_top[2] - c_bot_shifted[2])
+        parts.append(np.stack([cx + radius*np.cos(theta),
+                                cy + radius*np.sin(theta), cz], axis=1))
 
-		cx = cx_b + alphas * (cx_t - cx_b)
-		cy = cy_b + alphas * (cy_t - cy_b)
-		z  = z_bottom + alphas * (z_top - z_bottom)
+    def vogel_disk(cx, cy, z, n):
+        i = np.arange(n)
+        r = radius * np.sqrt((i + 0.5) / n)
+        t = i * GOLDEN_ANGLE
+        return np.stack([cx + r*np.cos(t), cy + r*np.sin(t), np.full(n, z)], axis=1)
 
-		xs = cx + radius * np.cos(thetas)
-		ys = cy + radius * np.sin(thetas)
+    if bot_points > 0:
+        parts.append(vogel_disk(*c_bot_shifted[:2], c_bot_shifted[2], bot_points))
+    if top_points > 0:
+        parts.append(vogel_disk(*c_top[:2], c_top[2], top_points))
 
-		all_pts_list.append(np.stack([xs, ys, z], axis=1))
-
-	# --- Cap sampling ---
-	def make_cap_pts(cx, cy, z, n):
-		i      = np.arange(n)
-		r      = radius * np.sqrt((i + 0.5) / n)
-		thetas = i * GOLDEN_ANGLE
-
-		xs = cx + r * np.cos(thetas)
-		ys = cy + r * np.sin(thetas)
-		zs = np.full(n, z)
-
-		return np.stack([xs, ys, zs], axis=1)
-
-	if bot_points > 0:
-		all_pts_list.append(make_cap_pts(cx_b, cy_b, z_bottom, bot_points))
-
-	if top_points > 0:
-		all_pts_list.append(make_cap_pts(cx_t, cy_t, z_top, top_points))
-
-	return np.vstack(all_pts_list)
-
-
-def calculate_wake_cylinder_parameters(
-	stl_mesh, 
-	r_factor, 
-	h_factor, 
-	v_inf,
-	tilt_deg=23.0
-):
-	vertices = np.asarray(stl_mesh.vertices)
-
-	# Downstream unit vector (horizontal only, for tilt)
-	v_inf_array = np.asarray(v_inf, dtype=float)
-	wind_dir_xy = np.array([v_inf_array[0], v_inf_array[1], 0.0])
-	norm = np.linalg.norm(wind_dir_xy)
-	
-	if norm < 1e-12:
-		raise ValueError("v_inf has no horizontal component.")
-	wind_dir_xy = wind_dir_xy / norm
-
-	# Smallest enclosing circle radius from convex hull of footprint
-	xy_coords = np.unique(vertices[:, :2], axis=0)
-	hull_pts = xy_coords[ConvexHull(xy_coords).vertices]
-	footprint_circumradius = 0.5 * cdist(hull_pts, hull_pts).max()
-
-	cylinder_radius = r_factor * footprint_circumradius
-
-	# Cylinder height and vertical extents
-	ground_level = vertices[:, 2].min()
-	mesh_top = vertices[:, 2].max()
-	z_mid = 0.5 * (ground_level + mesh_top)
-	
-	cylinder_height = h_factor * (mesh_top - ground_level)
-
-	# Horizontal center of bounding box
-	xy_center = np.array([
-		0.5 * (vertices[:, 0].min() + vertices[:, 0].max()),
-		0.5 * (vertices[:, 1].min() + vertices[:, 1].max())
-	])
-
-	# Tilt: axis leans downstream with height
-	tilt_gradient = np.tan(np.radians(tilt_deg))
-
-	def get_ring_center(z_level):
-		return np.append(xy_center + tilt_gradient * (z_level - z_mid) * wind_dir_xy[:2], z_level)
-
-	# Grounded to earth (mesh bottom), clearance parameter removed
-	z_bottom = ground_level
-	z_top = z_bottom + cylinder_height
-
-	# --- Intersection validation ---
-	# The tilted cylinder axis goes from bottom_center to top_center.
-	# For each building vertex we compute its distance from that axis line
-	# and also check that the vertex falls within the axial extents of
-	# the cylinder (i.e. between z_bottom and z_top).
-	bottom_center = get_ring_center(z_bottom)
-	top_center = get_ring_center(z_top)
-
-	axis_vec = top_center - bottom_center          # vector along the cylinder axis
-	axis_len_sq = np.dot(axis_vec, axis_vec)       # squared length of the axis
-
-	# Project every vertex onto the axis to get a scalar t in [0, 1]
-	diff = vertices - bottom_center                # (N, 3) offset from axis base
-	t = (diff @ axis_vec) / axis_len_sq            # (N,) scalar projections
-
-	# Closest point on the axis segment for each vertex
-	t_clamped = np.clip(t, 0.0, 1.0)
-	closest = bottom_center + t_clamped[:, np.newaxis] * axis_vec  # (N, 3)
-
-	# Perpendicular distance from each vertex to the axis
-	radial_dist = np.linalg.norm(vertices - closest, axis=1)       # (N,)
-
-	# A vertex is outside the cylinder when its radial distance exceeds the
-	# radius, within the axial extent of the cylinder.
-	outside_mask = (radial_dist > cylinder_radius) & (t >= 0.0) & (t <= 1.0)
-
-	if outside_mask.any():
-		n_outside = outside_mask.sum()
-		raise ValueError(
-			f"Building geometry is not fully contained within the wake cylinder: "
-			f"{n_outside} vertex/vertices found outside the cylinder volume. "
-			f"Increase r_factor (currently {r_factor}) or h_factor (currently {h_factor}) "
-			f"so the cylinder fully encloses the building."
-		)
-
-	return get_ring_center(z_bottom), get_ring_center(z_top), cylinder_radius
-
-def visualize_points(pts: np.ndarray, point_size: int = 5, color: str = "cyan") -> None:
-	"""
-	Visualize a point cloud from an (N, 3) numpy array.
- 
-	Args:
-		pts:        numpy array of shape (N, 3) with X, Y, Z columns.
-		point_size: size of each rendered point.
-		color:      color of the points (name or hex string).
-	"""
-	cloud = pv.PolyData(pts)
- 
-	plotter = pv.Plotter(window_size=[900, 700])
-	plotter.set_background("black")
-	plotter.add_points(cloud, color=color, point_size=point_size, render_points_as_spheres=True)
-
-	# Add a ground plane at z=0 for context
-	bounds = cloud.bounds
-	cx = (bounds[0] + bounds[1]) / 2
-	cy = (bounds[2] + bounds[3]) / 2
-	size = max(bounds[1] - bounds[0], bounds[3] - bounds[2]) * 3
-	ground = pv.Plane(center=(cx, cy, 0), direction=(0, 0, 1), i_size=size, j_size=size)
-	plotter.add_mesh(ground, color="gray", opacity=0.2)
-
-	plotter.add_axes()
-	plotter.show()
+    return np.vstack(parts)
 
 
+def generate_momentum_integration_mesh(
+    center_bot, center_top, radius,
+    total_points=100_000,
+    cap_bottom=False,
+    cap_top=False,
+) -> pv.PolyData:
+    """
+    Triangulated surface mesh of an oblique cylinder for momentum integration.
 
+    Points are distributed proportionally to surface area across wall and caps.
+    Lateral rings are staggered by half a step to improve triangle quality.
+    Cap interiors use a Vogel spiral with constrained Delaunay triangulation
+    (falls back to plain Delaunay if the `triangle` package is not installed).
+
+    Parameters
+    ----------
+    center_bot, center_top : (3,) cylinder axis endpoints
+    radius       : float
+    total_points : target total vertex count
+    cap_bottom   : include bottom cap
+    cap_top      : include top cap
+
+    Returns
+    -------
+    pv.PolyData  (triangles only)
+    """
+    c_bot = np.asarray(center_bot, dtype=float)
+    c_top = np.asarray(center_top, dtype=float)
+    cx_b, cy_b, z_bot = c_bot
+    cx_t, cy_t, z_top = c_top
+    L = float(np.linalg.norm(c_top - c_bot))
+
+    n_caps = int(cap_bottom) + int(cap_top)
+    lat_area = 2 * np.pi * radius * L
+    cap_area = np.pi * radius**2
+    total_area = lat_area + n_caps * cap_area
+
+    s = np.sqrt(total_area / total_points)        # target spacing
+    T = max(4, round(2 * np.pi * radius / s))     # points per ring
+    Z = max(1, round(L / s))                      # rings along axis
+
+    dtheta = 2 * np.pi / T
+    # Stagger odd rings by half a step
+    base_theta = np.linspace(0, 2*np.pi, T, endpoint=False)
+    shifts = (np.arange(Z + 1) % 2) * (dtheta / 2)
+    thetas_2d = base_theta[None, :] + shifts[:, None]   # (Z+1, T)
+
+    alpha  = np.linspace(0, 1, Z + 1)
+    cx_r = cx_b + alpha * (cx_t - cx_b)
+    cy_r = cy_b + alpha * (cy_t - cy_b)
+    z_r  = z_bot + alpha * (z_top - z_bot)
+
+    # --- Lateral vertices (Z+1 rings × T points) ---
+    lat_x = cx_r[:, None] + radius * np.cos(thetas_2d)
+    lat_y = cy_r[:, None] + radius * np.sin(thetas_2d)
+    lat_z = np.tile(z_r[:, None], (1, T))
+    lat_pts = np.stack([lat_x.ravel(), lat_y.ravel(), lat_z.ravel()], axis=1)
+
+    def lat_idx(ring, j):
+        return ring * T + (j % T)
+
+    # --- Lateral faces (staggered triangles) ---
+    faces = []
+    for i in range(Z):
+        for j in range(T):
+            jn = (j + 1) % T
+            a, b = lat_idx(i, j), lat_idx(i, jn)
+            c, d = lat_idx(i+1, j), lat_idx(i+1, jn)
+            if i % 2 == 0:
+                faces += [3, a, b, c,  3, c, b, d]
+            else:
+                faces += [3, a, b, d,  3, c, a, d]
+
+    all_pts = [lat_pts]
+
+    # --- Cap builder ---
+    def add_cap(ring_i, cx, cy, z, inward):
+        # Vogel interior points (slightly shrunk to stay inside the rim)
+        n_int = max(0, round(cap_area / s**2) - T)
+        if n_int > 0:
+            k = np.arange(n_int)
+            r = 0.97 * radius * np.sqrt((k + 0.5) / n_int)
+            t = k * GOLDEN_ANGLE
+            int_pts = np.stack([cx + r*np.cos(t), cy + r*np.sin(t),
+                                np.full(n_int, z)], axis=1)
+        else:
+            int_pts = np.empty((0, 3))
+
+        # 2-D coords for triangulation: rim first, then interior
+        rim_2d = np.stack([
+            cx + radius * np.cos(base_theta + shifts[ring_i]),
+            cy + radius * np.sin(base_theta + shifts[ring_i]),
+        ], axis=1)
+        pts_2d = np.vstack([rim_2d, int_pts[:, :2]]) if n_int > 0 else rim_2d
+
+        if tr is not None:
+            segs = np.array([[i, (i+1) % T] for i in range(T)], dtype=np.int_)
+            result = tr.triangulate({"vertices": pts_2d, "segments": segs}, "p")
+            simplices = result["triangles"]
+        else:
+            simplices = Delaunay(pts_2d).simplices
+
+        int_offset = sum(p.shape[0] for p in all_pts)
+        if n_int > 0:
+            all_pts.append(int_pts)
+
+        def g(local):   # local index → global index
+            return lat_idx(ring_i, local) if local < T else int_offset + (local - T)
+
+        for s_ in simplices:
+            a, b, c = g(s_[0]), g(s_[1]), g(s_[2])
+            faces.extend([3, a, c, b] if inward else [3, a, b, c])
+
+    if cap_bottom:
+        add_cap(0, cx_b, cy_b, z_bot, inward=True)
+    if cap_top:
+        add_cap(Z, cx_t, cy_t, z_top, inward=False)
+
+    return pv.PolyData(np.vstack(all_pts), np.array(faces, dtype=np.int_))
+
+
+def visualize_points(pts: np.ndarray, point_size=5, color="cyan") -> None:
+    """Quick point-cloud preview with a ground plane at z=0."""
+    cloud = pv.PolyData(pts)
+    pl = pv.Plotter(window_size=[900, 700])
+    pl.set_background("black")
+    pl.add_points(cloud, color=color, point_size=point_size,
+                  render_points_as_spheres=True)
+    b = cloud.bounds
+    cx, cy = (b[0]+b[1])/2, (b[2]+b[3])/2
+    size = max(b[1]-b[0], b[3]-b[2]) * 3
+    pl.add_mesh(pv.Plane(center=(cx, cy, 0), direction=(0,0,1),
+                         i_size=size, j_size=size), color="gray", opacity=0.2)
+    pl.add_axes()
+    pl.show()
+
+
+# ---------------------------------------------------------------------------
+# Quick test
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-	STL_PATH        = r"input_stls/Aerospecial_building4.stl"
-	V_INF           = np.array([0.0, 13.6, 0.0])   
-	R_FACTOR        = 3    # cylinder radius = R_FACTOR * building footprint circumradius
-	H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
-	TILT_DEG        = 23.0   # downstream wake tilt in degrees
-	import trimesh
-	stl_mesh = trimesh.load_mesh(STL_PATH)
-	bot,top,radius = calculate_wake_cylinder_parameters(
-		stl_mesh, R_FACTOR, H_FACTOR, V_INF, tilt_deg=TILT_DEG
-	)
-	coords = generate_cylindrical_sampling_coordinates(
-		bot, top, radius,
-		z_clearance=.1,
-		side_points=270,
-		top_points=30,
-		)
-	#visualize_points(coords, point_size=5)
+    import trimesh
 
-	mesh = generate_momentum_integration_mesh(
-    bot, top, radius,
-    total_points=100,
-    cap_top=True,
-	)
+    STL_PATH = r"input_stls/Aerospecial_building4.stl"
+    V_INF    = np.array([0.0, 13.6, 0.0])
 
-	# Compute and visualize normals to verify orientation (consistent with momentum.py)
-	mesh = mesh.compute_normals(
-		cell_normals=True,
-		point_normals=False,
-		consistent_normals=True,
-		auto_orient_normals=True,
-	)
+    stl = trimesh.load_mesh(STL_PATH)
+    stl.apply_scale(1e-3)
 
-	plotter = pv.Plotter()
-	plotter.add_mesh(mesh, show_edges=True, opacity=0.5, color="white")
+    bot, top, radius = calculate_wake_cylinder_parameters(
+        stl, r_factor=3.0, h_factor=1.4, v_inf=V_INF, tilt_deg=23.0
+    )
+    print(f"bot={bot}  top={top}  r={radius:.4f}")
 
-	# Add ground plane
-	size = radius * 15
-	ground = pv.Plane(center=(bot[0], bot[1], 0), direction=(0, 0, 1), i_size=size, j_size=size)
-	plotter.add_mesh(ground, color="gray", opacity=0.2)
+    drone_pts = generate_cylindrical_sampling_coordinates(
+        bot, top, radius, z_clearance=0.1, side_points=270, top_points=30
+    )
+    print(f"drone points: {drone_pts.shape[0]}")
 
-	# Visualize cell normals using arrows at cell centers.
-	# A factor of 5.0 is used to make them visible relative to the cylinder size.
-	centers = mesh.cell_centers()
-	centers["Normals"] = mesh.cell_data["Normals"]
-	arrow_scale = radius * 0.15  # 15% of cylinder radius, adjust to taste
-	arrows = centers.glyph(orient="Normals", scale=False, factor=arrow_scale)
+    mesh = generate_momentum_integration_mesh(bot, top, radius,
+                                              total_points=100, cap_top=True)
+    mesh = mesh.compute_normals(cell_normals=True, point_normals=False,
+                                consistent_normals=True, auto_orient_normals=True)
 
-	plotter.add_mesh(arrows, color="red")
-	plotter.add_axes()
-	plotter.show()
-	
-# 	  bottom center : [  6.52458984 110.09721077   0.        ]
-#   top center    : [  6.52458984 141.35553624  73.64      ]
-#   radius        : 76.2963 m
-	
+    pl = pv.Plotter()
+    pl.add_mesh(mesh, show_edges=True, opacity=0.5, color="white")
+    size = radius * 15
+    pl.add_mesh(pv.Plane(center=(bot[0], bot[1], 0), direction=(0,0,1),
+                         i_size=size, j_size=size), color="gray", opacity=0.2)
+    arrows = mesh.cell_centers().glyph(orient="Normals", scale=False,
+                                       factor=radius*0.15)
+    pl.add_mesh(arrows, color="red")
+    pl.add_axes()
+    pl.show()

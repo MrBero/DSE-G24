@@ -1,317 +1,70 @@
 """
-main.py
--------
-Wind-field force pipeline. Wires together:
-	cylinder_geom     -- sampling geometry
-	cfd_sampler       -- IDW (Inverse Distance Weighting) interpolation of CFD data
-	flowpanelwrapper  -- Julia FLOWPanel potential-flow prior
-	divergence_free_gpr -- divergence-free vector GPR (Gaussian Process Regression) for velocity
-	momentum          -- surface-force integration
-
-Inputs (hard-coded paths, edit below if needed):
-	inputs/csv_with_everything.pkl      -- CFD data
-	input_stls/Aerospecial_building4.stl -- building geometry STL
+main.py  --  wind-force pipeline
 """
 
-import hashlib
 import os
-import time
 import numpy as np
 import pandas as pd
 import trimesh
 
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import Matern
-
-from cylinder_geom import (
-	calculate_wake_cylinder_parameters,
-	generate_cylindrical_sampling_coordinates,
-	generate_momentum_integration_mesh,
-	visualize_points
-)
-from cfd_sampler import build_cfd_sampler
 from flowpanelwrapper import FLOWPanelSolver
-from divergence_free_gpr import DivergenceFreeGPR
+from cfd_sampler import build_cfd_sampler
+from cylinder_geom import (
+    calculate_wake_cylinder_parameters,
+    generate_cylindrical_sampling_coordinates,
+    generate_momentum_integration_mesh,
+)
+from fit_gprs import fit_gprs
 from momentum import surface_force
-from visualize_pipeline import visualize  
 
-# =============================================================================
-# Configuration
-# =============================================================================
+# ── Settings ─────────────────────────────────────────────────────────────────
 
-STL_PATH        = r"input_stls/Aerospecial_building4.stl"
-CFD_PKL_PATH    = r"inputs/csv_with_everything.pkl"
-#CACHE_PATH      = r"inputs/cfd_sampler_cache.joblib" #not really necessary in my experience doesn't speed it up as it still has to load the 20 000 000 points
+STL_PATH  = "input_stls/Aerospecial_building4.stl"
+CFD_PATH  = "inputs/csv_with_everything.pkl"
+V_INF     = np.array([0.0, 13.6, 0.0])
+RHO       = 1.225
 
-V_INF           = np.array([0.0, 13.6, 0.0])   # free-stream velocity (m/s)
-RHO             = 1.225                          # air density (kg/m^3)
-STL_SCALE       = 1.0 / 1000.0                  # STL is in mm, convert to m
+R_FACTOR, H_FACTOR, TILT_DEG = 2.4, 1.4, 10.0
+N_SIDE, N_TOP                 = 324, 76
+N_MOM                         = 100_000
 
-# Cylinder geometry multipliers (passed to calculate_wake_cylinder_parameters)
-R_FACTOR        = 2.4    # cylinder radius = R_FACTOR * building footprint circumradius
-H_FACTOR        = 1.4    # cylinder height = H_FACTOR * building height
-TILT_DEG        = 10   # downstream wake tilt in degrees
+# ── One-time setup  (keep alive to avoid reloading) ──────────────────────────
 
-# Sampling
-N_DRONES_SIDE  = 324    # points used to train the GPR
-N_DRONES_TOP = 76
-N_MOM_POINTS    = 100_000 # points on the momentum integration surface
-drone_depth = 0
+stl    = trimesh.load_mesh(STL_PATH); stl.apply_scale(1e-3)
+solver = FLOWPanelSolver(stl, V_INF, julia_script="FP.jl", julia_bin="julia")
+cfd    = build_cfd_sampler(pd.read_pickle(CFD_PATH), n_points=4, sharpness=2.0)
 
-# GPR settings
-N_RESTARTS      = 8      # L-BFGS-B (Limited-memory Broyden-Fletcher-Goldfarb-Shanno Bounded) restarts for velocity hyperparameter optimisation
-POSTERIOR_BATCH = 4_000  # chunk size to bound peak memory during prediction
+# ── Cylinder geometry ─────────────────────────────────────────────────────────
 
-# IDW (Inverse Distance Weighting) sampler settings
-IDW_N_POINTS    = 4
-IDW_SHARPNESS   = 2.0
+c_bot, c_top, radius = calculate_wake_cylinder_parameters(
+    stl, R_FACTOR, H_FACTOR, V_INF, tilt_deg=TILT_DEG)
 
-# =============================================================================
-# Helpers
-# =============================================================================
+# ── Drone points  (stack more here for adaptive sampling) ────────────────────
 
+drone_pts  = generate_cylindrical_sampling_coordinates(
+    c_bot, c_top, radius, z_clearance=0.1, side_points=N_SIDE, top_points=N_TOP)
+cfd_fields = cfd(drone_pts)
 
-def predict_batched(estimator, pts: np.ndarray, batch: int = 4_000) -> np.ndarray:
-	"""Call estimator.predict in chunks to bound peak memory. Returns (N,)."""
-	pts = np.asarray(pts, dtype=float)
-	out = np.empty(pts.shape[0], dtype=float)
-	for i in range(0, pts.shape[0], batch):
-		out[i:i + batch] = estimator.predict(pts[i:i + batch])
-	return out
+# ── Fit GPRs ──────────────────────────────────────────────────────────────────
 
+gprs = fit_gprs(drone_pts, cfd_fields, solver)
 
-def _fmt(seconds: float) -> str:
-	"""Format a duration as a human-readable string."""
-	if seconds < 60:
-		return f"{seconds:.2f}s"
-	m, s = divmod(seconds, 60)
-	return f"{int(m)}m {s:.2f}s"
+# ── Momentum mesh + prior (cached) ───────────────────────────────────────────
 
+mom_mesh  = generate_momentum_integration_mesh(
+    c_bot, c_top, radius, total_points=N_MOM, cap_top=True)
+mom_pts   = np.asarray(mom_mesh.points, dtype=float)
 
-def _prior_mom_cache_path(stl_path, v_inf, center_bot, center_top, radius, n_mom_points, cap_bottom, cap_top) -> str:
-	bits = (stl_path, tuple(v_inf), tuple(center_bot), tuple(center_top), round(radius, 6), n_mom_points, cap_bottom, cap_top)
-	h = hashlib.md5(str(bits).encode()).hexdigest()[:10]
-	return f"cache/prior_mom_{h}.npy"
+cache = f"cache/prior_{hash((STL_PATH,*V_INF,*c_bot,*c_top,round(radius,4),N_MOM))}.npy"
+os.makedirs("cache", exist_ok=True)
+prior_mom = np.load(cache) if os.path.exists(cache) else np.save(
+    cache, solver.velocity(mom_pts, blank_interior=True)) or np.load(cache)
 
-# =============================================================================
-# Main pipeline
-# =============================================================================
+# ── Reconstruct + integrate force ────────────────────────────────────────────
 
-def run():
-	pipeline_start = time.perf_counter()
+mom_mesh["velocity"], mom_mesh["pressure"] = gprs.predict(mom_pts, prior_mom)
 
-	# ------------------------------------------------------------------
-	# 1. Load geometry and start panel solver
-	# ------------------------------------------------------------------
-	print("Loading STL...")
-	t0 = time.perf_counter()
-	stl_mesh = trimesh.load_mesh(STL_PATH)
-	stl_mesh.apply_scale(STL_SCALE)
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
+F = surface_force(mom_mesh, rho=RHO, interior_point=stl.centroid)
+print(f"F = {F/1e3} kN   |F| = {np.linalg.norm(F):.4g} N")
 
-	print("Starting Julia panel server...")
-	t0 = time.perf_counter()
-	solver = FLOWPanelSolver(stl_mesh, V_INF, julia_script="FP.jl",
-							 julia_bin="julia", verbose=True)
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	# ------------------------------------------------------------------
-	# 2. Determine cylinder geometry from the building mesh
-	# ------------------------------------------------------------------
-	print("Computing cylinder geometry...")
-	t0 = time.perf_counter()
-	center_bot, center_top, radius = calculate_wake_cylinder_parameters(
-		stl_mesh, R_FACTOR, H_FACTOR, V_INF, tilt_deg=TILT_DEG
-	)
-	print(f"  bottom center : {center_bot}")
-	print(f"  top center    : {center_top}")
-	print(f"  radius        : {radius:.4f} m")
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	# ------------------------------------------------------------------
-	# 3. Generate sampling coordinates (drone points) and momentum mesh
-	# ------------------------------------------------------------------
-	print("Generating sampling coordinates...")
-	t0 = time.perf_counter()
-	if drone_depth > 0:
-		drone_pts_inner = generate_cylindrical_sampling_coordinates(
-		center_bot, center_top, radius - drone_depth,
-		z_clearance=.1,
-		side_points=N_DRONES_SIDE // 2,
-		top_points=N_DRONES_TOP,
-		bot_points=0
-		)
-		drone_pts_outer = generate_cylindrical_sampling_coordinates(
-			center_bot, center_top, radius + drone_depth,
-			z_clearance=.1,
-			side_points=N_DRONES_SIDE // 2,
-			top_points=0,
-			bot_points=0
-		)
-		drone_pts = np.vstack([drone_pts_inner, drone_pts_outer])
-	else:
-		drone_pts = generate_cylindrical_sampling_coordinates(
-		center_bot, center_top, radius,
-		z_clearance=.1,
-		side_points=N_DRONES_SIDE,
-		top_points=N_DRONES_TOP,
-		bot_points=0
-	)
-
-
-
-	#	visualize_points(drone_pts, point_size=5)
-	print(f"  total points  : {drone_pts.shape[0]}")
-
-	print(f"  drone points  : {drone_pts.shape[0]}")
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	print("Generating momentum integration mesh...")
-	t0 = time.perf_counter()
-	mom_mesh = generate_momentum_integration_mesh(
-		center_bot, center_top, radius,
-		total_points=N_MOM_POINTS,
-		cap_bottom=False, cap_top=True,
-	)
-	print(f"  momentum pts  : {mom_mesh.n_points}")
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	# ------------------------------------------------------------------
-	# 4. Sample CFD at drone locations
-	# ------------------------------------------------------------------
-	print("Loading CFD data and building IDW sampler...")
-	t0 = time.perf_counter()
-	df = pd.read_pickle(CFD_PKL_PATH)
-	cfd_sample = build_cfd_sampler(
-		df, n_points=IDW_N_POINTS, sharpness=IDW_SHARPNESS, #cache_path=CACHE_PATH
-	)
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	print("Sampling CFD at drone points...")
-	t0 = time.perf_counter()
-	cfd_at_drone = cfd_sample(drone_pts)          # (N_drone, 4): [vx,vy,vz,p]
-	training_vels = cfd_at_drone[:, :3]           # (N_drone, 3)
-	training_pres = cfd_at_drone[:, 3]            # (N_drone,)
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	# ------------------------------------------------------------------
-	# 5. Get panel-solver (potential flow) velocities at drone points
-	# ------------------------------------------------------------------
-	print("Evaluating potential-flow prior at drone points...")
-	t0 = time.perf_counter()
-	prior_at_drone = solver.velocity(drone_pts, blank_interior=False)  # (N_drone, 3)
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	if np.isnan(prior_at_drone).any():
-		raise RuntimeError("NaNs in potential-flow prior at drone points.")
-
-	# ------------------------------------------------------------------
-	# 6. Fit divergence-free velocity GPR on residuals
-	# ------------------------------------------------------------------
-	print("Fitting velocity GPR...")
-	t0 = time.perf_counter()
-	vel_residuals = training_vels - prior_at_drone   # (N_drone, 3)
-
-	vel_gpr = DivergenceFreeGPR(
-		n_restarts=N_RESTARTS,
-		posterior_batch=POSTERIOR_BATCH,
-	).fit(drone_pts, vel_residuals)
-
-	print(f"  ell={vel_gpr.ell_}  var={vel_gpr.var_:.4g}  "
-		  f"noise={vel_gpr.noise_:.4g}  nll={vel_gpr.nll_:.6g}")
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	# ------------------------------------------------------------------
-	# 7. Fit scalar pressure GPR (no prior subtracted -- panel solver
-	#    produces no pressure, so raw CFD pressure is the target)
-	# ------------------------------------------------------------------
-	print("Fitting pressure GPR...")
-	t0 = time.perf_counter()
-	p_kernel = Matern(
-		length_scale=[1.0, 1.0, 1.0],
-		length_scale_bounds=(1e-2, 1e3),
-		nu=2.5,
-	)
-	p_gpr = GaussianProcessRegressor(
-		kernel=p_kernel, normalize_y=True,
-		n_restarts_optimizer=8, random_state=0,
-	).fit(drone_pts, training_pres)
-	print(f"  fitted pressure kernel: {p_gpr.kernel_}")
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	# ------------------------------------------------------------------
-	# 8. Predict velocity + pressure at momentum mesh points,
-	#    attach to mesh, compute surface force
-	# ------------------------------------------------------------------
-	print("Evaluating potential-flow prior at momentum mesh points...")
-	t0 = time.perf_counter()
-	mom_pts = np.asarray(mom_mesh.points, dtype=float)
-	cache_path = _prior_mom_cache_path(STL_PATH, V_INF, center_bot, center_top, radius, N_MOM_POINTS, False, True)
-	if os.path.exists(cache_path):
-		print(f"  Loading cached prior: {cache_path}")
-		prior_at_mom = np.load(cache_path)
-	else:
-		prior_at_mom = solver.velocity(mom_pts, blank_interior=True)
-		os.makedirs("cache", exist_ok=True)
-		np.save(cache_path, prior_at_mom)
-		print(f"  Saved prior cache: {cache_path}")
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	print("Predicting velocity posterior at momentum mesh points...")
-	t0 = time.perf_counter()
-	mom_vel = vel_gpr.predict(mom_pts, prior_at_mom)               # (N_mom, 3)
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	print("Predicting pressure posterior at momentum mesh points...")
-	t0 = time.perf_counter()
-	mom_pres = predict_batched(p_gpr, mom_pts, batch=POSTERIOR_BATCH)  # (N_mom,)
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	# Attach fields directly
-	mom_mesh["velocity"] = mom_vel
-	mom_mesh["pressure"] = mom_pres
-
-	print("Computing surface force...")
-	building_centroid = np.array([ #this might go in the cylinder_geom.py but is also simple enough to be kept here
-		stl_mesh.centroid[0],
-		stl_mesh.centroid[1],
-		stl_mesh.centroid[2],
-	])
-	t0 = time.perf_counter()
-	F = surface_force(mom_mesh, rho=RHO, interior_point = building_centroid)
-	print(f"  [done in {_fmt(time.perf_counter() - t0)}]")
-
-	F_mag = float(np.linalg.norm(F))
-	print("\n=== Result ===")
-	print(f"Force vector: Fx={F[0]/1000:.3f}  Fy={F[1]/1000:.3f}  Fz={F[2]/1000:.3f} kN")
-	print(f"  |F|          : {F_mag:.4g} N")
-	print(f"\n=== Total pipeline time: {_fmt(time.perf_counter() - pipeline_start)} ===")
-
-	# ------------------------------------------------------------------
-	# Cleanup
-	# ------------------------------------------------------------------
-	solver.close()
-
-	return {
-		"force_vector" : F,
-		"force_mag"    : F_mag,
-		"vel_gpr"      : vel_gpr,
-		"p_gpr"        : p_gpr,
-		"mom_mesh"     : mom_mesh,       # <-- Add this line
-		"stl_mesh"     : stl_mesh,       # <-- Add this line
-		"drone_pts"    : drone_pts,      # <-- Add this line
-		"drone_vels"   : training_vels,  # <-- Add this line
-	}
-
-
-if __name__ == "__main__":
-	result = run()
-
-	print("\nStarting rendering pipeline...")
-	visualize(
-		mom_mesh=result["mom_mesh"],
-		stl_mesh=result["stl_mesh"],
-		drone_pts=result["drone_pts"],
-		drone_vels=result["drone_vels"],
-		show=True
-	)
+solver.close()
